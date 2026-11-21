@@ -72,12 +72,12 @@ button.deny:hover { border-color: var(--beni); color: var(--beni-ink); }
 .detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3rem; min-width: 0; }
 .panel { border-top: 1px solid var(--ink); }
 .panel h2 { font-size: 1.375rem; font-weight: 300; padding: 1rem 0; }
-.diagram { width: 100%; height: auto; display: block; margin: 0.5rem 0 1.5rem; }
+.diagram { width: 100%; height: auto; display: block; margin: 0.25rem 0 1.25rem; }
 .diagram.narrow { display: none; }
-.diagram .station line { stroke: var(--hair); }
 .diagram text { font-family: var(--sans); font-size: 13px; font-weight: 400; fill: var(--ink-3); }
 .diagram .station text.earlier { fill: var(--beni-ink); }
 .diagram .cp line { stroke: var(--beni); stroke-dasharray: 2 5; }
+.diagram .station line { stroke: var(--hair-strong); }
 .diagram .cp text { fill: var(--beni-ink); }
 .diagram path { fill: none; stroke-width: 1.4; }
 .diagram .in { stroke: var(--beni); }
@@ -161,56 +161,41 @@ function segment(cls: string, x1: number, y1: number, x2: number, y2: number): s
   return `<path class="${cls}" style="--len:${len}" d="M${x1} ${y1} L${x2} ${y2}"/>`;
 }
 
-// One junction on the checkpoint: every held flow runs into it, the seal lands on it, sinks leave from it.
+// Reads left to right: source rails feed one junction on the checkpoint, where the seal sits; the train continues to the sensitive action.
 function diagram(request: ApprovalRequest, state: DiagramState, width: number, variant: "wide" | "narrow"): string {
-  const sources = [
-    ...new Map([
-      ...request.steps.filter((s) => !s.sink).map((s) => [s.tool, false] as const),
-      ...request.flows.filter((f) => f.earlier).map((f) => [f.source, true] as const),
-    ]),
-  ];
-  const sinks = request.steps.filter((s) => s.sink).map((s) => s.tool);
-  const row = 44;
-  const yOf = (i: number) => 30 + i * row;
-  const checkpointY = yOf(sources.length);
-  const sinkY = (tool: string) => yOf(sources.length + 1 + sinks.indexOf(tool));
-  const height = yOf(sources.length + sinks.length) + 20;
-  const right = width - 8;
-  const junction = Math.round(width * (variant === "wide" ? 0.42 : 0.3));
-  const hold = 56;
+  const sources = [...new Map(request.flows.map((f) => [f.source, f.earlier])).entries()];
+  const sinks = [...new Set(request.flows.map((f) => f.sink))];
+  if (sources.length === 0) return "";
+  const row = 52;
+  const yOf = (r: number) => 34 + r * row;
+  const narrow = variant === "narrow";
+  const junction = { x: Math.round(width * (narrow ? 0.7 : 0.5)), y: (yOf(sources.length - 1) + yOf(sources.length)) / 2 };
+  const depart = Math.round(width * (narrow ? 0.56 : 0.28));
+  const arrive = Math.round(width * (narrow ? 0.84 : 0.72));
+  const height = yOf(sources.length + sinks.length - 1) + 30;
 
-  const station = (y: number, label: string, cls = "") =>
-    `<g class="station"><line x1="0" y1="${y}" x2="${width}" y2="${y}"/><text x="${right}" y="${y - 9}" text-anchor="end"${cls ? ` class="${cls}"` : ""}>${escape(label)}</text></g>`;
-  const rows = [
-    ...sources.map(([tool, earlier], i) => station(yOf(i), earlier ? `${tool} · read earlier` : tool, earlier ? "earlier" : "")),
-    `<g class="cp"><line x1="0" y1="${checkpointY}" x2="${width}" y2="${checkpointY}"/><text x="${right}" y="${checkpointY - 9}" text-anchor="end">関 checkpoint</text></g>`,
-    ...sinks.map((tool) => station(sinkY(tool), tool)),
+  const rails = [
+    ...sources.map(([tool, earlier], i) => {
+      const y = yOf(i);
+      return `<g class="station"><line x1="0" y1="${y}" x2="${depart}" y2="${y}"/><text x="0" y="${y - 9}"${earlier ? ' class="earlier"' : ""}>${escape(earlier && !narrow ? `${tool} · read earlier` : tool)}</text></g>`;
+    }),
+    ...sinks.map((tool, j) => {
+      const y = yOf(sources.length + j);
+      return `<g class="station"><line x1="${arrive}" y1="${y}" x2="${width}" y2="${y}"/><text x="${width}" y="${y + 19}" text-anchor="end">${escape(tool)}</text></g>`;
+    }),
   ].join("");
+  const checkpoint = `<g class="cp"><line x1="${junction.x}" y1="8" x2="${junction.x}" y2="${height - 4}"/><text x="${junction.x + (narrow ? -10 : 10)}" y="18"${narrow ? ' text-anchor="end"' : ""}>関 checkpoint</text></g>`;
 
-  const sourceRows = [...new Set(request.flows.map((f) => f.source))]
-    .map((source) => sources.findIndex(([tool]) => tool === source))
-    .filter((i) => i >= 0);
-  const startX = (n: number) =>
-    sourceRows.length === 1 ? junction * 0.45 : 24 + (n * (junction - 120)) / (sourceRows.length - 1);
-  const inbound = sourceRows.map((i, n) => segment("in", Math.round(startX(n)), yOf(i), junction, checkpointY));
-  const outbound =
-    state === "stopped"
-      ? []
-      : [...new Set(request.flows.map((f) => f.sink))]
-          .filter((sink) => sinks.includes(sink))
-          .map((sink) => {
-            const y3 = sinkY(sink);
-            return segment("out", junction + hold, checkpointY, junction + hold + (y3 - checkpointY) * 0.4, y3);
-          });
-  const holdSegment = state === "stopped" ? "" : segment("hold", junction, checkpointY, junction + hold, checkpointY);
-  const sealX = junction + hold / 2;
+  const inbound = sources.map((_, i) => segment("in", depart, yOf(i), junction.x - 18, junction.y));
+  const hold = state === "stopped" ? "" : segment("hold", junction.x - 18, junction.y, junction.x + 18, junction.y);
+  const outbound = state === "stopped" ? [] : sinks.map((_, j) => segment("out", junction.x + 18, junction.y, arrive, yOf(sources.length + j)));
   const seal =
     state === "sealed"
-      ? `<image href="/assets/seal.svg" x="${sealX - 18}" y="${checkpointY - 18}" width="36" height="36" transform="rotate(-4 ${sealX} ${checkpointY})"/>`
+      ? `<image href="/assets/seal.svg" x="${junction.x - 18}" y="${junction.y - 18}" width="36" height="36" transform="rotate(-4 ${junction.x} ${junction.y})"/>`
       : state === "pending"
-        ? `<rect class="slot" x="${sealX - 18}" y="${checkpointY - 18}" width="36" height="36"/>`
+        ? `<rect class="slot" x="${junction.x - 18}" y="${junction.y - 18}" width="36" height="36"/>`
         : "";
-  return `<svg class="diagram ${variant}${state === "sealed" ? " sealed" : ""}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Plan: untrusted sources above the checkpoint, sensitive actions below">${rows}${inbound.join("")}${holdSegment}${outbound.join("")}${seal}</svg>`;
+  return `<svg class="diagram ${variant}${state === "sealed" ? " sealed" : ""}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Untrusted sources on the left run through the checkpoint to sensitive actions on the right">${checkpoint}${rails}${inbound.join("")}${hold}${outbound.join("")}${seal}</svg>`;
 }
 
 const KEYWORDS = /^(const|let|var|await|async|return|for|of|in|if|else|new|function|while|try|catch|throw)$/;
