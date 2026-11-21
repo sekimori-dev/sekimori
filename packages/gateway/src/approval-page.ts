@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { ApprovalRequest, ApprovalStore } from "./approvals.ts";
 
 const escape = (value: string) =>
@@ -70,12 +71,11 @@ export function openInBrowser(url: string): Promise<string> {
 
 // The approver credential never appears in anything the agent receives; it reaches the browser
 // through the opened URL and lives on as an HttpOnly cookie. See docs/superpowers/specs/2026-11-21-slice-2-approvals-design.md section 6.
-export function startApprovalPage(
+export async function startApprovalPage(
   store: ApprovalStore,
   options: { port: number; openBrowser: boolean; onNotified: (approvalId: string, outcome: string) => void },
 ) {
-  const { port } = options;
-  const origin = `http://127.0.0.1:${port}`;
+  let origin = `http://127.0.0.1:${options.port}`;
   const token = randomBytes(18).toString("base64url");
   const valid = (candidate: string | null) =>
     candidate !== null && candidate.length === token.length && timingSafeEqual(Buffer.from(candidate), Buffer.from(token));
@@ -126,8 +126,17 @@ export function startApprovalPage(
     );
   });
 
-  server.listen(port, "127.0.0.1");
+  // Another gateway (e.g. a second Claude Code session) may hold the configured port; fall back to a free one.
+  const port = await new Promise<number>((resolve, reject) => {
+    const listen = (candidate: number) => server.listen(candidate, "127.0.0.1");
+    server.once("listening", () => resolve((server.address() as AddressInfo).port));
+    server.on("error", (error: NodeJS.ErrnoException) => (error.code === "EADDRINUSE" && server.listening === false ? listen(0) : reject(error)));
+    listen(options.port);
+  });
+  origin = `http://127.0.0.1:${port}`;
+
   return {
+    port,
     indexUrl: `${origin}/?t=${token}`,
     // Opens the request for the human and returns the token-free link the agent may show.
     announce(approvalId: string): string {

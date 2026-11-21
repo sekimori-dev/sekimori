@@ -45,17 +45,17 @@ const upstreams = await Promise.all(config.upstreams.map(connectUpstream));
 const audit = (event: object) => process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 
 const approvals = createApprovalStore(config.approvals.ttlMinutes * 60_000);
-const approvalPage = startApprovalPage(approvals, {
+const approvalPage = await startApprovalPage(approvals, {
   ...config.approvals,
   onNotified: (approvalId, outcome) => audit({ type: "approver_notified", approvalId, outcome }),
 });
-const sessionFile = join(sessionDir, `approver-${config.approvals.port}.json`);
+const sessionFile = join(sessionDir, `approver-${approvalPage.port}.json`);
 await mkdir(sessionDir, { recursive: true, mode: 0o700 });
-await writeFile(sessionFile, JSON.stringify({ port: config.approvals.port, pid: process.pid }), { mode: 0o600 });
+await writeFile(sessionFile, JSON.stringify({ port: approvalPage.port, pid: process.pid }), { mode: 0o600 });
 process.on("SIGUSR2", () => {
   openInBrowser(approvalPage.indexUrl).then((outcome) => audit({ type: "approver_notified", via: "signal", outcome }));
 });
-audit({ type: "approval_page", port: config.approvals.port });
+audit({ type: "approval_page", port: approvalPage.port });
 
 const gateway = createGateway({
   agent: config.agent,
