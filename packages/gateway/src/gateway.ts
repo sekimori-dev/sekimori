@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ApprovalStore } from "./approvals.ts";
 import type { Classification, Limits } from "./config.ts";
 import { renderDeclarations } from "./declarations.ts";
-import { classify, describePlan, extractPlan, type Plan, type ToolClass } from "./plan.ts";
+import { classify, extractPlan, formatStep, planSteps, type Flow, type Plan, type ToolClass } from "./plan.ts";
 import type { Decision, Policy } from "./policy.ts";
 import { runProgram, type Bindings } from "./sandbox.ts";
 import type { Upstream } from "./upstream.ts";
@@ -62,11 +62,12 @@ export function createGateway(options: GatewayOptions) {
   };
 
   // Returns why a human must look at this program before it runs; empty means it may run as is.
-  function approvalReasons(plan: Plan): { reasons: string[]; denied?: string } {
+  function approvalReasons(plan: Plan): { reasons: string[]; flows: Flow[]; denied?: string } {
     const reasons: string[] = [];
+    const flows: Flow[] = [];
     for (const call of plan.calls.filter((c) => !c.runtimeArgs)) {
       const decision = policy.authorizeCall({ agent, ...splitTool(call.tool), args: call.args });
-      if (!decision.allowed) return { reasons, denied: `Denied by policy: ${call.tool}` };
+      if (!decision.allowed) return { reasons, flows, denied: `Denied by policy: ${call.tool}` };
       if (decision.approvalRequired) reasons.push(`Policy requires approval for ${call.tool}`);
     }
     const planned = plan.calls.map((c) => c.tool).filter((t) => classOf(t).source === "untrusted");
@@ -74,13 +75,14 @@ export function createGateway(options: GatewayOptions) {
     for (const sink of plan.calls.filter((c) => classOf(c.tool).sink)) {
       for (const source of sources) {
         if (!policy.authorizeFlow({ agent, source, sink: sink.tool, args: sink.args }).allowed) {
-          const earlier = planned.includes(source) ? "" : " (read earlier in this session)";
-          reasons.push(`Untrusted data from ${source}${earlier} may reach ${sink.tool}`);
+          const earlier = !planned.includes(source);
+          if (!flows.some((f) => f.source === source && f.sink === sink.tool)) flows.push({ source, sink: sink.tool, earlier });
+          reasons.push(`Untrusted data from ${source}${earlier ? " (read earlier in this session)" : ""} may reach ${sink.tool}`);
         }
       }
     }
     if (plan.open) reasons.push("The program uses tools in ways Sekimori cannot read before running");
-    return { reasons: [...new Set(reasons)] };
+    return { reasons: [...new Set(reasons)], flows };
   }
 
   return {
@@ -106,7 +108,7 @@ export function createGateway(options: GatewayOptions) {
       } catch (error) {
         return finish({ executionId, status: "rejected", error: (error as Error).message });
       }
-      const { reasons, denied } = approvalReasons(plan);
+      const { reasons, flows, denied } = approvalReasons(plan);
       audit({ type: "plan", executionId, agent, hash: plan.hash, calls: plan.calls.length, open: plan.open, reasons });
       if (denied) return finish({ executionId, status: "rejected", error: denied });
 
@@ -121,14 +123,15 @@ export function createGateway(options: GatewayOptions) {
         approved = true;
         audit({ type: "approval_used", executionId, agent, approvalId });
       } else if (reasons.length > 0) {
-        const request = approvals.request({ agent, code, plan, summary: describePlan(plan, classOf), reasons });
+        const steps = planSteps(plan, classOf);
+        const request = approvals.request({ agent, code, plan, steps, flows, reasons });
         audit({ type: "approval_requested", executionId, agent, approvalId: request.id });
         return finish({
           executionId,
           status: "approval_required",
           approvalId: request.id,
           approveAt: options.notifyApprover(request.id),
-          plan: request.summary,
+          plan: [...steps.map(formatStep), ...(plan.open ? ["plus calls Sekimori cannot read before running"] : [])],
           reasons,
         });
       }

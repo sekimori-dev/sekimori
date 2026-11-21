@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
-import type { Plan } from "./plan.ts";
+import type { Flow, Plan, PlanStep } from "./plan.ts";
 
 export interface ApprovalRequest {
   id: string;
   agent: string;
   code: string;
   plan: Plan;
-  summary: string[];
+  steps: PlanStep[];
+  flows: Flow[];
   reasons: string[];
   status: "pending" | "approved" | "denied" | "used";
   expiresAt: number;
@@ -19,7 +20,7 @@ export function createApprovalStore(ttlMs: number, now: () => number = Date.now)
   const waiters = new Map<string, Set<() => void>>();
 
   return {
-    request(fields: Pick<ApprovalRequest, "agent" | "code" | "plan" | "summary" | "reasons">): ApprovalRequest {
+    request(fields: Pick<ApprovalRequest, "agent" | "code" | "plan" | "steps" | "flows" | "reasons">): ApprovalRequest {
       const request: ApprovalRequest = {
         ...fields,
         id: `ap_${randomBytes(9).toString("base64url")}`,

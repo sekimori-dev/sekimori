@@ -126,17 +126,39 @@ export function extractPlan(code: string, namespaces: Set<string>): Plan {
   return { hash: `sha256:${createHash("sha256").update(code).digest("hex")}`, calls, open };
 }
 
-export function describePlan(plan: Plan, classOf: (tool: string) => ToolClass): string[] {
+export interface PlanStep {
+  tool: string;
+  repeated: boolean;
+  untrusted: boolean;
+  sink: boolean;
+  args: string[];
+  runtimeArgs: boolean;
+}
+
+export interface Flow {
+  source: string;
+  sink: string;
+  earlier: boolean;
+}
+
+export function planSteps(plan: Plan, classOf: (tool: string) => ToolClass): PlanStep[] {
   const byTool = new Map<string, PlannedCall[]>();
   for (const call of plan.calls) byTool.set(call.tool, [...(byTool.get(call.tool) ?? []), call]);
-  const lines = [...byTool].map(([tool, calls]) => {
+  return [...byTool].map(([tool, calls]) => {
     const kind = classOf(tool);
-    const label = [kind.source === "untrusted" ? "untrusted" : "", kind.sink ? "sensitive" : ""].filter(Boolean).join(", ");
-    const count = calls.length > 1 || calls.some((c) => c.repeated) ? "×n" : "×1";
-    const args = calls
-      .flatMap((c) => Object.entries(c.args).map(([k, v]) => `${k}: ${JSON.stringify(v)}`))
-      .concat(calls.some((c) => c.runtimeArgs) ? ["arguments decided at runtime"] : []);
-    return [tool, count, label, args.join(", ")].filter(Boolean).join("  ");
+    return {
+      tool,
+      repeated: calls.length > 1 || calls.some((c) => c.repeated),
+      untrusted: kind.source === "untrusted",
+      sink: kind.sink,
+      args: calls.flatMap((c) => Object.entries(c.args).map(([k, v]) => `${k}: ${JSON.stringify(v)}`)),
+      runtimeArgs: calls.some((c) => c.runtimeArgs),
+    };
   });
-  return plan.open ? [...lines, "plus calls Sekimori cannot read before running"] : lines;
+}
+
+export function formatStep(step: PlanStep): string {
+  const label = [step.untrusted ? "untrusted" : "", step.sink ? "sensitive" : ""].filter(Boolean).join(", ");
+  const args = [...step.args, ...(step.runtimeArgs ? ["arguments decided at runtime"] : [])].join(", ");
+  return [step.tool, step.repeated ? "×n" : "×1", label, args].filter(Boolean).join("  ");
 }
