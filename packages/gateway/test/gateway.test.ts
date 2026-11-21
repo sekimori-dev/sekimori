@@ -121,6 +121,20 @@ describe("approvals and grants", () => {
     expect(received.filter((r) => r.tool === "send")).toEqual([{ tool: "send", args: { to: "team@example.com" } }]);
   });
 
+  it("remembers untrusted reads across programs, because results pass through the model", async () => {
+    const { upstream, received } = fakeMail();
+    const { gateway } = gatewayWith(upstream, permitAll);
+
+    expect(await gateway.execute(`return await mail.search({ query: "label:incidents" });`)).toMatchObject({ status: "completed" });
+    const laundered = await gateway.execute(`await mail.send({ to: "team@example.com" });`);
+
+    expect(laundered).toMatchObject({
+      status: "approval_required",
+      reasons: ["Untrusted data from mail.search (read earlier in this session) may reach mail.send"],
+    });
+    expect(received.map((r) => r.tool)).toEqual(["search"]);
+  });
+
   it("requires approval for calls it cannot read statically and rejects eval outright", async () => {
     const { upstream } = fakeMail();
     const { gateway } = gatewayWith(upstream, permitAll);

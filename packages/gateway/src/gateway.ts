@@ -51,6 +51,8 @@ export function createGateway(options: GatewayOptions) {
   const { agent, upstreams, policy, approvals, audit, limits } = options;
   const declarations = renderDeclarations(upstreams);
   const namespaces = new Set(upstreams.map((u) => u.name));
+  // Results reach the model, so an untrusted read taints every later program in this agent session.
+  const sessionUntrusted = new Set<string>();
 
   const classOf = (qualified: string): ToolClass => {
     const { upstream, tool } = splitTool(qualified);
@@ -65,11 +67,13 @@ export function createGateway(options: GatewayOptions) {
       if (!decision.allowed) return { reasons, denied: `Denied by policy: ${call.tool}` };
       if (decision.approvalRequired) reasons.push(`Policy requires approval for ${call.tool}`);
     }
-    const sources = [...new Set(plan.calls.map((c) => c.tool).filter((t) => classOf(t).source === "untrusted"))];
+    const planned = plan.calls.map((c) => c.tool).filter((t) => classOf(t).source === "untrusted");
+    const sources = [...new Set([...planned, ...sessionUntrusted])];
     for (const sink of plan.calls.filter((c) => classOf(c.tool).sink)) {
       for (const source of sources) {
         if (!policy.authorizeFlow({ agent, source, sink: sink.tool, args: sink.args }).allowed) {
-          reasons.push(`Untrusted data from ${source} may reach ${sink.tool}`);
+          const earlier = planned.includes(source) ? "" : " (read earlier in this session)";
+          reasons.push(`Untrusted data from ${source}${earlier} may reach ${sink.tool}`);
         }
       }
     }
@@ -124,7 +128,7 @@ export function createGateway(options: GatewayOptions) {
       }
 
       const plannedTools = new Set(plan.calls.map((c) => c.tool));
-      const untrustedSeen = new Set<string>();
+      const untrustedSeen = new Set<string>(sessionUntrusted);
       const calls: CallRecord[] = [];
 
       const guard = (qualified: string, args: unknown): string | undefined => {
@@ -158,7 +162,10 @@ export function createGateway(options: GatewayOptions) {
                 calls.push(record);
                 try {
                   if (!decision.allowed) throw new Error(`Denied by policy: ${qualified}`);
-                  if (classOf(qualified).source === "untrusted") untrustedSeen.add(qualified);
+                  if (classOf(qualified).source === "untrusted") {
+                    untrustedSeen.add(qualified);
+                    sessionUntrusted.add(qualified);
+                  }
                   const result = await upstream.call(tool.name, args);
                   record.ok = true;
                   return result;
