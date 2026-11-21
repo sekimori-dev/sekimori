@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "sekimori": {
+      "command": "node",
+      "args": [
+        "packages/gateway/src/cli.ts",
+        "--config",
+        "packages/gateway/example/sekimori.config.json"
+      ]
+    }
+  }
+}

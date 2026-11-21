@@ -1,0 +1,12 @@
+{
+  "agent": "claude-code",
+  "policies": "policies.cedar",
+  "upstreams": [
+    {
+      "name": "fs",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    }
+  ],
+  "limits": { "timeoutMs": 30000 }
+}
