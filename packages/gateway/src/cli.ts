@@ -1,16 +1,37 @@
 #!/usr/bin/env node
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { startApprovalPage } from "./approval-page.ts";
+import { openInBrowser, startApprovalPage } from "./approval-page.ts";
 import { createApprovalStore } from "./approvals.ts";
 import { loadConfig } from "./config.ts";
 import { createGateway } from "./gateway.ts";
 import { createPolicy } from "./policy.ts";
 import { connectUpstream } from "./upstream.ts";
 
-const { values } = parseArgs({ options: { config: { type: "string", default: "sekimori.config.json" } } });
+const { values, positionals } = parseArgs({
+  options: { config: { type: "string", default: "sekimori.config.json" } },
+  allowPositionals: true,
+});
+
+// Running gateways leave a user-only file with their approver link, so a human can always get back in.
+const sessionDir = join(homedir(), ".sekimori");
+const approvalsCommand = `node ${import.meta.filename} approvals`;
+
+if (positionals[0] === "approvals") {
+  const files = (await readdir(sessionDir).catch(() => [])).filter((f) => f.startsWith("approver-"));
+  if (files.length === 0) console.log("No running Sekimori gateway found.");
+  for (const file of files) {
+    const { url } = JSON.parse(await readFile(join(sessionDir, file), "utf8"));
+    console.log(`${file}: ${await openInBrowser(url)}`);
+  }
+  process.exit(0);
+}
+
 const { config, policyText } = await loadConfig(values.config);
 
 const upstreams = await Promise.all(config.upstreams.map(connectUpstream));
@@ -18,7 +39,13 @@ const upstreams = await Promise.all(config.upstreams.map(connectUpstream));
 const audit = (event: object) => process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 
 const approvals = createApprovalStore(config.approvals.ttlMinutes * 60_000);
-const approvalPage = startApprovalPage(approvals, config.approvals);
+const approvalPage = startApprovalPage(approvals, {
+  ...config.approvals,
+  onNotified: (approvalId, outcome) => audit({ type: "approver_notified", approvalId, outcome }),
+});
+const sessionFile = join(sessionDir, `approver-${config.approvals.port}.json`);
+await mkdir(sessionDir, { recursive: true, mode: 0o700 });
+await writeFile(sessionFile, JSON.stringify({ url: approvalPage.indexUrl, pid: process.pid }), { mode: 0o600 });
 audit({ type: "approval_page", url: approvalPage.indexUrl });
 
 const gateway = createGateway({
@@ -47,7 +74,7 @@ server.registerTool(
   "execute",
   {
     description:
-      "Runs a TypeScript program in Sekimori's sandbox. The namespaces from `describe_api` are globals; use top-level await and `return` the value you need. Every tool call is checked against policy. If the result has status `approval_required`, tell the user (Sekimori has opened the request in their browser; `approveAt` is the same page) and show the plan and reasons, wait until they confirm they approved it, then call `execute` again with the identical code and the `approvalId`.",
+      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that Sekimori opened the request in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Wait until they confirm they approved it, then call \`execute\` again with the identical code and the \`approvalId\`.`,
     inputSchema: {
       code: z.string().describe("TypeScript program body"),
       approvalId: z.string().optional().describe("Approval ID from an earlier approval_required result"),
@@ -63,6 +90,7 @@ await server.connect(new StdioServerTransport());
 
 process.stdin.on("close", async () => {
   approvalPage.close();
+  await rm(sessionFile, { force: true });
   await Promise.all(upstreams.map((u) => u.close()));
   process.exit(0);
 });

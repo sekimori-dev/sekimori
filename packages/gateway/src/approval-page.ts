@@ -58,17 +58,22 @@ function cookieToken(req: IncomingMessage): string | null {
   return match?.[1] ?? null;
 }
 
-function openInBrowser(url: string): void {
+export function openInBrowser(url: string): Promise<string> {
   const [command, args] =
     process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
-  const child = spawn(command, args as string[], { detached: true, stdio: "ignore" });
-  child.on("error", () => {});
-  child.unref();
+  return new Promise((resolve) => {
+    const child = spawn(command, args as string[], { stdio: "ignore" });
+    child.on("error", (error) => resolve(`failed: ${error.message}`));
+    child.on("exit", (code) => resolve(code === 0 ? "opened" : `failed: ${command} exited with ${code}`));
+  });
 }
 
 // The approver credential never appears in anything the agent receives; it reaches the browser
 // through the opened URL and lives on as an HttpOnly cookie. See docs/superpowers/specs/2026-11-21-slice-2-approvals-design.md section 6.
-export function startApprovalPage(store: ApprovalStore, options: { port: number; openBrowser: boolean }) {
+export function startApprovalPage(
+  store: ApprovalStore,
+  options: { port: number; openBrowser: boolean; onNotified: (approvalId: string, outcome: string) => void },
+) {
   const { port } = options;
   const origin = `http://127.0.0.1:${port}`;
   const token = randomBytes(18).toString("base64url");
@@ -126,7 +131,9 @@ export function startApprovalPage(store: ApprovalStore, options: { port: number;
     indexUrl: `${origin}/?t=${token}`,
     // Opens the request for the human and returns the token-free link the agent may show.
     announce(approvalId: string): string {
-      if (options.openBrowser) openInBrowser(`${origin}/a/${approvalId}?t=${token}`);
+      if (options.openBrowser) {
+        openInBrowser(`${origin}/a/${approvalId}?t=${token}`).then((outcome) => options.onNotified(approvalId, outcome));
+      }
       return `${origin}/a/${approvalId}`;
     },
     close: () => server.close(),
