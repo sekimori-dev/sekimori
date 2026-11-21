@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
 import type { ApprovalRequest, ApprovalStore } from "./approvals.ts";
 
@@ -27,12 +28,12 @@ function page(title: string, body: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)}</title><style>${STYLE}</style></head><body><h1>Sekimori<span lang="ja">関守</span></h1>${body}</body></html>`;
 }
 
-function requestPage(request: ApprovalRequest, token: string): string {
+function requestPage(request: ApprovalRequest): string {
   const list = (items: string[]) => `<ul>${items.map((i) => `<li>${escape(i)}</li>`).join("")}</ul>`;
   const decided =
     request.status === "pending"
-      ? `<form method="post" action="/a/${request.id}/approve"><input type="hidden" name="t" value="${token}"><button>Approve</button></form>
-         <form method="post" action="/a/${request.id}/deny"><input type="hidden" name="t" value="${token}"><button class="deny">Deny</button></form>`
+      ? `<form method="post" action="/a/${request.id}/approve"><button>Approve</button></form>
+         <form method="post" action="/a/${request.id}/deny"><button class="deny">Deny</button></form>`
       : request.status === "denied"
         ? "<p>Denied.</p>"
         : `<p><span class="seal" lang="ja" aria-label="Approved">関</span> Approved. The agent can now resubmit this program.</p>`;
@@ -46,43 +47,65 @@ function requestPage(request: ApprovalRequest, token: string): string {
   );
 }
 
-async function formToken(req: IncomingMessage): Promise<string | null> {
-  let body = "";
-  for await (const chunk of req) {
-    body += chunk;
-    if (body.length > 4096) return null;
-  }
-  return new URLSearchParams(body).get("t");
+const FORBIDDEN = page(
+  "Approver session needed",
+  `<section><h2>This browser is not signed in as the approver.</h2>
+   <p>Sekimori opens approval requests in your browser when an agent asks for one. You can also open the index link the gateway printed to its log (stderr).</p></section>`,
+);
+
+function cookieToken(req: IncomingMessage): string | null {
+  const match = (req.headers.cookie ?? "").match(/(?:^|;\s*)sekimori_approver=([\w-]+)/);
+  return match?.[1] ?? null;
 }
 
-export function startApprovalPage(store: ApprovalStore, port: number) {
+function openInBrowser(url: string): void {
+  const [command, args] =
+    process.platform === "darwin" ? ["open", [url]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : ["xdg-open", [url]];
+  const child = spawn(command, args as string[], { detached: true, stdio: "ignore" });
+  child.on("error", () => {});
+  child.unref();
+}
+
+// The approver credential never appears in anything the agent receives; it reaches the browser
+// through the opened URL and lives on as an HttpOnly cookie. See docs/superpowers/specs/2026-11-21-slice-2-approvals-design.md section 6.
+export function startApprovalPage(store: ApprovalStore, options: { port: number; openBrowser: boolean }) {
+  const { port } = options;
+  const origin = `http://127.0.0.1:${port}`;
   const token = randomBytes(18).toString("base64url");
   const valid = (candidate: string | null) =>
     candidate !== null && candidate.length === token.length && timingSafeEqual(Buffer.from(candidate), Buffer.from(token));
 
-  const server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", origin);
     const send = (status: number, html: string) => {
       res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       res.end(html);
     };
 
-    const decision = req.method === "POST" ? url.pathname.match(/^\/a\/(ap_[\w-]+)\/(approve|deny)$/) : null;
-    if (decision) {
-      if (!valid(await formToken(req))) return send(403, page("Forbidden", "<p>Missing or wrong token.</p>"));
-      const decided = store.decide(decision[1]!, decision[2] === "approve");
-      if (!decided) return send(409, page("Not pending", "<p>This approval is no longer pending.</p>"));
-      res.writeHead(303, { location: `/a/${decided.id}?t=${token}` });
+    if (req.method === "GET" && valid(url.searchParams.get("t"))) {
+      res.writeHead(303, {
+        location: url.pathname,
+        "set-cookie": `sekimori_approver=${token}; HttpOnly; SameSite=Strict; Path=/`,
+        "cache-control": "no-store",
+      });
       return res.end();
     }
+    if (!valid(cookieToken(req))) return send(403, FORBIDDEN);
 
-    if (req.method !== "GET" || !valid(url.searchParams.get("t"))) {
-      return send(403, page("Forbidden", "<p>Missing or wrong token.</p>"));
+    const decision = req.method === "POST" ? url.pathname.match(/^\/a\/(ap_[\w-]+)\/(approve|deny)$/) : null;
+    if (decision) {
+      if (req.headers.origin !== origin) return send(403, FORBIDDEN);
+      const decided = store.decide(decision[1]!, decision[2] === "approve");
+      if (!decided) return send(409, page("Not pending", "<p>This approval is no longer pending.</p>"));
+      res.writeHead(303, { location: `/a/${decided.id}` });
+      return res.end();
     }
+    if (req.method !== "GET") return send(405, page("Not allowed", "<p>Method not allowed.</p>"));
+
     const view = url.pathname.match(/^\/a\/(ap_[\w-]+)$/);
     if (view) {
       const request = store.get(view[1]!);
-      return request ? send(200, requestPage(request, token)) : send(404, page("Not found", "<p>Unknown approval.</p>"));
+      return request ? send(200, requestPage(request)) : send(404, page("Not found", "<p>Unknown approval.</p>"));
     }
     const pending = store.pending();
     return send(
@@ -91,7 +114,7 @@ export function startApprovalPage(store: ApprovalStore, port: number) {
         "Pending approvals",
         `<section><h2>Pending approvals</h2>${
           pending.length
-            ? `<ul>${pending.map((r) => `<li><a href="/a/${r.id}?t=${token}">${escape(r.id)}</a> · ${escape(r.agent)} · ${escape(r.reasons[0] ?? "")}</li>`).join("")}</ul>`
+            ? `<ul>${pending.map((r) => `<li><a href="/a/${r.id}">${escape(r.id)}</a> · ${escape(r.agent)} · ${escape(r.reasons[0] ?? "")}</li>`).join("")}</ul>`
             : "<p>Nothing is waiting for a seal.</p>"
         }</section>`,
       ),
@@ -100,8 +123,12 @@ export function startApprovalPage(store: ApprovalStore, port: number) {
 
   server.listen(port, "127.0.0.1");
   return {
-    url: (approvalId: string) => `http://127.0.0.1:${port}/a/${approvalId}?t=${token}`,
-    indexUrl: `http://127.0.0.1:${port}/?t=${token}`,
+    indexUrl: `${origin}/?t=${token}`,
+    // Opens the request for the human and returns the token-free link the agent may show.
+    announce(approvalId: string): string {
+      if (options.openBrowser) openInBrowser(`${origin}/a/${approvalId}?t=${token}`);
+      return `${origin}/a/${approvalId}`;
+    },
     close: () => server.close(),
   };
 }

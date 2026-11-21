@@ -32,7 +32,7 @@ function gatewayWith(upstream: Upstream, policies: string, timeoutMs = 2_000) {
     classification: { mail: { trusted: [], untrusted: ["search"], sinks: ["send"] } },
     policy: createPolicy(policies),
     approvals,
-    approvalUrl: (id) => `http://approvals.test/a/${id}`,
+    notifyApprover: (id) => `http://approvals.test/a/${id}`,
     audit: (event) => events.push(event),
     limits: { timeoutMs, memoryBytes: 32 * 1024 * 1024 },
   });

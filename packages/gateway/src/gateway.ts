@@ -37,7 +37,7 @@ export interface GatewayOptions {
   classification: Record<string, Classification>;
   policy: Policy;
   approvals: ApprovalStore;
-  approvalUrl: (approvalId: string) => string;
+  notifyApprover: (approvalId: string) => string;
   audit: (event: AuditEvent) => void;
   limits: Limits;
 }
@@ -117,7 +117,7 @@ export function createGateway(options: GatewayOptions) {
           executionId,
           status: "approval_required",
           approvalId: request.id,
-          approveAt: options.approvalUrl(request.id),
+          approveAt: options.notifyApprover(request.id),
           plan: request.summary,
           reasons,
         });

@@ -34,6 +34,7 @@ const configSchema = z.object({
     .object({
       port: z.number().int().min(1).max(65535).default(4747),
       ttlMinutes: z.number().positive().default(15),
+      openBrowser: z.boolean().default(true),
     })
     .prefault({}),
 });

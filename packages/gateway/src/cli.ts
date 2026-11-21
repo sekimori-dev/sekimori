@@ -18,7 +18,7 @@ const upstreams = await Promise.all(config.upstreams.map(connectUpstream));
 const audit = (event: object) => process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 
 const approvals = createApprovalStore(config.approvals.ttlMinutes * 60_000);
-const approvalPage = startApprovalPage(approvals, config.approvals.port);
+const approvalPage = startApprovalPage(approvals, config.approvals);
 audit({ type: "approval_page", url: approvalPage.indexUrl });
 
 const gateway = createGateway({
@@ -27,7 +27,7 @@ const gateway = createGateway({
   classification: Object.fromEntries(config.upstreams.map((u) => [u.name, u.classify])),
   policy: createPolicy(policyText),
   approvals,
-  approvalUrl: approvalPage.url,
+  notifyApprover: approvalPage.announce,
   audit,
   limits: config.limits,
 });
@@ -47,7 +47,7 @@ server.registerTool(
   "execute",
   {
     description:
-      "Runs a TypeScript program in Sekimori's sandbox. The namespaces from `describe_api` are globals; use top-level await and `return` the value you need. Every tool call is checked against policy. If the result has status `approval_required`, show the user the `approveAt` link with the plan and reasons, wait until they confirm they approved it, then call `execute` again with the identical code and the `approvalId`.",
+      "Runs a TypeScript program in Sekimori's sandbox. The namespaces from `describe_api` are globals; use top-level await and `return` the value you need. Every tool call is checked against policy. If the result has status `approval_required`, tell the user (Sekimori has opened the request in their browser; `approveAt` is the same page) and show the plan and reasons, wait until they confirm they approved it, then call `execute` again with the identical code and the `approvalId`.",
     inputSchema: {
       code: z.string().describe("TypeScript program body"),
       approvalId: z.string().optional().describe("Approval ID from an earlier approval_required result"),
