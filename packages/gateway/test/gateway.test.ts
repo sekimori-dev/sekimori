@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createApprovalStore } from "../src/approvals.ts";
 import { createGateway, type AuditEvent } from "../src/gateway.ts";
 import { createPolicy } from "../src/policy.ts";
 import type { Upstream } from "../src/upstream.ts";
@@ -20,55 +21,117 @@ function fakeMail() {
   return { upstream, received };
 }
 
-const policies = `
-permit(principal == Agent::"test-agent", action == Action::"call", resource);
-forbid(principal, action, resource == Tool::"mail.send");
-`;
+const permitAll = `permit(principal == Agent::"test-agent", action == Action::"call", resource);`;
 
-function gatewayWith(upstream: Upstream, timeoutMs = 2_000) {
+function gatewayWith(upstream: Upstream, policies: string, timeoutMs = 2_000) {
   const events: AuditEvent[] = [];
+  const approvals = createApprovalStore(60_000);
   const gateway = createGateway({
     agent: "test-agent",
     upstreams: [upstream],
-    authorize: createPolicy(policies),
+    classification: { mail: { trusted: [], untrusted: ["search"], sinks: ["send"] } },
+    policy: createPolicy(policies),
+    approvals,
+    approvalUrl: (id) => `http://approvals.test/a/${id}`,
     audit: (event) => events.push(event),
     limits: { timeoutMs, memoryBytes: 32 * 1024 * 1024 },
   });
-  return { gateway, events };
+  return { gateway, approvals, events };
 }
 
-describe("gateway", () => {
+describe("sandbox and policy", () => {
   it("runs an agent program against policy-checked tool bindings", async () => {
     const { upstream, received } = fakeMail();
-    const { gateway } = gatewayWith(upstream);
+    const { gateway } = gatewayWith(upstream, permitAll);
 
     const result = await gateway.execute(`
       const mails: Array<{ subject: string }> = await mail.search({ query: "label:incidents" }) as any;
       return mails.map((m) => m.subject.toUpperCase());
     `);
 
-    expect(result).toMatchObject({ ok: true, value: ["DISK FULL", "CERT EXPIRY"] });
+    expect(result).toMatchObject({
+      status: "completed",
+      value: ["DISK FULL", "CERT EXPIRY"],
+      calls: [{ n: 1, tool: "mail.search", decision: "allow", ok: true }],
+    });
     expect(received).toEqual([{ tool: "search", args: { query: "label:incidents" } }]);
-    expect(result.calls).toEqual([{ n: 1, tool: "mail.search", decision: "allow", ok: true }]);
   });
 
-  it("denies a forbidden call before it reaches the upstream and audits it", async () => {
+  it("rejects a program whose planned call policy denies, before anything runs", async () => {
     const { upstream, received } = fakeMail();
-    const { gateway, events } = gatewayWith(upstream);
+    const { gateway, events } = gatewayWith(upstream, `${permitAll}\nforbid(principal, action, resource == Tool::"mail.send");`);
 
     const result = await gateway.execute(`await mail.send({ to: "attacker@example.com" });`);
 
-    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("Denied by policy: mail.send") });
+    expect(result).toMatchObject({ status: "rejected", error: "Denied by policy: mail.send" });
     expect(received).toEqual([]);
-    expect(events).toContainEqual(expect.objectContaining({ type: "call", tool: "mail.send", ok: false }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "execution", status: "rejected" }));
   });
 
   it("interrupts a runaway program at the time limit", async () => {
     const { upstream } = fakeMail();
-    const { gateway } = gatewayWith(upstream, 200);
+    const { gateway } = gatewayWith(upstream, permitAll, 200);
 
     const result = await gateway.execute(`while (true) {}`);
 
-    expect(result.ok).toBe(false);
+    expect(result.status).toBe("failed");
+  });
+});
+
+describe("approvals and grants", () => {
+  const readThenSend = `
+    const mails: any = await mail.search({ query: "label:incidents" });
+    await mail.send({ to: "team@example.com" });
+    return mails.length;
+  `;
+
+  it("asks once for a program where untrusted data meets a sink, then runs it only with the identical code", async () => {
+    const { upstream, received } = fakeMail();
+    const { gateway, approvals } = gatewayWith(upstream, permitAll);
+
+    const first = await gateway.execute(readThenSend);
+    expect(first).toMatchObject({ status: "approval_required", reasons: ["Untrusted data from mail.search may reach mail.send"] });
+    expect(received).toEqual([]);
+    if (first.status !== "approval_required") return;
+
+    approvals.decide(first.approvalId, true);
+    const tampered = await gateway.execute(readThenSend.replace("team@", "attacker@"), first.approvalId);
+    expect(tampered).toMatchObject({ status: "rejected", error: "Code does not match the approved program" });
+
+    const approved = await gateway.execute(readThenSend, first.approvalId);
+    expect(approved).toMatchObject({ status: "completed", value: 2 });
+    expect(await gateway.execute(readThenSend, first.approvalId)).toMatchObject({ status: "rejected" });
+  });
+
+  it("lets a standing grant cover a flow, and asks when the grant cannot be checked before running", async () => {
+    const { upstream, received } = fakeMail();
+    const grant = `${permitAll}
+      @grant("incident-digest")
+      permit(principal == Agent::"test-agent", action == Action::"flow", resource == Tool::"mail.send")
+      when { context.source == "mail.search" && context.args.to == "team@example.com" };`;
+    const { gateway } = gatewayWith(upstream, grant);
+
+    expect(await gateway.execute(readThenSend)).toMatchObject({ status: "completed", value: 2 });
+
+    const steered = await gateway.execute(`
+      const mails: any = await mail.search({ query: "label:incidents" });
+      await mail.send({ to: mails[0].subject });
+    `);
+    expect(steered).toMatchObject({ status: "approval_required" });
+    expect(received.filter((r) => r.tool === "send")).toEqual([{ tool: "send", args: { to: "team@example.com" } }]);
+  });
+
+  it("requires approval for calls it cannot read statically and rejects eval outright", async () => {
+    const { upstream } = fakeMail();
+    const { gateway } = gatewayWith(upstream, permitAll);
+
+    const aliased = await gateway.execute(`const send = mail.send; await send({ to: "x@example.com" });`);
+    expect(aliased).toMatchObject({
+      status: "approval_required",
+      reasons: expect.arrayContaining(["The program uses tools in ways Sekimori cannot read before running"]),
+    });
+
+    const evaluated = await gateway.execute(`eval("mail.send({ to: 'x@example.com' })");`);
+    expect(evaluated).toMatchObject({ status: "rejected", error: expect.stringContaining("`eval` is not allowed") });
   });
 });

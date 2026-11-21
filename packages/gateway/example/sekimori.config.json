@@ -5,8 +5,14 @@
     {
       "name": "fs",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "classify": {
+        "trusted": ["list_*", "get_file_info", "directory_tree", "list_allowed_directories"],
+        "untrusted": ["read_*", "search_files"],
+        "sinks": ["write_*", "edit_*", "move_*", "create_*"]
+      }
     }
   ],
-  "limits": { "timeoutMs": 30000 }
+  "limits": { "timeoutMs": 30000 },
+  "approvals": { "port": 4747, "ttlMinutes": 15 }
 }
