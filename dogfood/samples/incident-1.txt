@@ -1,0 +1,1 @@
+Disk full on db-1 at 03:12. Postgres stopped accepting writes for 9 minutes.

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "approvals": "node packages/gateway/src/cli.ts approvals"
   }
 }
