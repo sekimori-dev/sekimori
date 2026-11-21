@@ -18,7 +18,7 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
 });
 
-// Running gateways leave a user-only file with their approver link, so a human can always get back in.
+// Running gateways leave a file with only their port and pid; the approver token never leaves gateway memory.
 const sessionDir = join(homedir(), ".sekimori");
 const approvalsCommand = `node ${import.meta.filename} approvals`;
 
@@ -26,8 +26,14 @@ if (positionals[0] === "approvals") {
   const files = (await readdir(sessionDir).catch(() => [])).filter((f) => f.startsWith("approver-"));
   if (files.length === 0) console.log("No running Sekimori gateway found.");
   for (const file of files) {
-    const { url } = JSON.parse(await readFile(join(sessionDir, file), "utf8"));
-    console.log(`${file}: ${await openInBrowser(url)}`);
+    const { port, pid } = JSON.parse(await readFile(join(sessionDir, file), "utf8"));
+    try {
+      process.kill(pid, "SIGUSR2");
+      console.log(`Asked the gateway on port ${port} to open its approvals in your browser.`);
+    } catch {
+      await rm(join(sessionDir, file), { force: true });
+      console.log(`Removed a stale entry for port ${port}.`);
+    }
   }
   process.exit(0);
 }
@@ -45,8 +51,11 @@ const approvalPage = startApprovalPage(approvals, {
 });
 const sessionFile = join(sessionDir, `approver-${config.approvals.port}.json`);
 await mkdir(sessionDir, { recursive: true, mode: 0o700 });
-await writeFile(sessionFile, JSON.stringify({ url: approvalPage.indexUrl, pid: process.pid }), { mode: 0o600 });
-audit({ type: "approval_page", url: approvalPage.indexUrl });
+await writeFile(sessionFile, JSON.stringify({ port: config.approvals.port, pid: process.pid }), { mode: 0o600 });
+process.on("SIGUSR2", () => {
+  openInBrowser(approvalPage.indexUrl).then((outcome) => audit({ type: "approver_notified", via: "signal", outcome }));
+});
+audit({ type: "approval_page", port: config.approvals.port });
 
 const gateway = createGateway({
   agent: config.agent,
