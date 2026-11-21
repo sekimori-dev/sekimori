@@ -1,0 +1,1 @@
+TLS certificate for api.example.com expires in 6 days. Renewal job failed twice.

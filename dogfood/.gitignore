@@ -1,0 +1,6 @@
+# Agent output lands here during dogfooding; only the profile and samples are tracked.
+/*
+!/.gitignore
+!/.mcp.json
+!/.claude/
+!/samples/

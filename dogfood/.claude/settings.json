@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": ["mcp__sekimori__describe_api", "mcp__sekimori__execute"],
+    "deny": [
+      "Bash",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "mcp__claude-in-chrome",
+      "mcp__rea",
+      "mcp__plugin_figma_figma"
+    ],
+    "defaultMode": "default",
+    "disableAutoMode": "disable",
+    "disableBypassPermissionsMode": "disable"
+  },
+  "enabledMcpjsonServers": ["sekimori"],
+  "disableClaudeAiConnectors": true,
+  "disableSkillShellExecution": true
+}
