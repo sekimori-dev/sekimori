@@ -35,6 +35,7 @@ function gatewayWith(upstream: Upstream, policies: string, timeoutMs = 2_000) {
     notifyApprover: (id) => `http://approvals.test/a/${id}`,
     audit: (event) => events.push(event),
     limits: { timeoutMs, memoryBytes: 32 * 1024 * 1024 },
+    approvalWaitMs: 1_000,
   });
   return { gateway, approvals, events };
 }
@@ -85,7 +86,7 @@ describe("approvals and grants", () => {
     return mails.length;
   `;
 
-  it("asks once for a program where untrusted data meets a sink, then runs it only with the identical code", async () => {
+  it("asks once, runs the identical resubmitted code as soon as the human approves, and rejects tampering or reuse", async () => {
     const { upstream, received } = fakeMail();
     const { gateway, approvals } = gatewayWith(upstream, permitAll);
 
@@ -94,12 +95,15 @@ describe("approvals and grants", () => {
     expect(received).toEqual([]);
     if (first.status !== "approval_required") return;
 
+    const waiting = gateway.execute(readThenSend, first.approvalId);
     approvals.decide(first.approvalId, true);
-    const tampered = await gateway.execute(readThenSend.replace("team@", "attacker@"), first.approvalId);
-    expect(tampered).toMatchObject({ status: "rejected", error: "Code does not match the approved program" });
+    expect(await waiting).toMatchObject({ status: "completed", value: 2 });
 
-    const approved = await gateway.execute(readThenSend, first.approvalId);
-    expect(approved).toMatchObject({ status: "completed", value: 2 });
+    const second = await gateway.execute(readThenSend);
+    if (second.status !== "approval_required") throw new Error("expected a second approval");
+    approvals.decide(second.approvalId, true);
+    const tampered = await gateway.execute(readThenSend.replace("team@", "attacker@"), second.approvalId);
+    expect(tampered).toMatchObject({ status: "rejected", error: "Code does not match the approved program" });
     expect(await gateway.execute(readThenSend, first.approvalId)).toMatchObject({ status: "rejected" });
   });
 

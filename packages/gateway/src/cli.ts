@@ -66,6 +66,7 @@ const gateway = createGateway({
   notifyApprover: approvalPage.announce,
   audit,
   limits: config.limits,
+  approvalWaitMs: config.approvals.waitSeconds * 1000,
 });
 
 const server = new McpServer({ name: "sekimori", version: "0.0.0" });
@@ -83,7 +84,7 @@ server.registerTool(
   "execute",
   {
     description:
-      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that Sekimori opened the request in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Wait until they confirm they approved it, then call \`execute\` again with the identical code and the \`approvalId\`.`,
+      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that Sekimori opened the request in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Then immediately call \`execute\` again with the identical code and the \`approvalId\`, without waiting for the user to reply: that call waits for their decision and runs the program once they approve. If it returns \`approval_pending\`, call it again the same way.`,
     inputSchema: {
       code: z.string().describe("TypeScript program body"),
       approvalId: z.string().optional().describe("Approval ID from an earlier approval_required result"),

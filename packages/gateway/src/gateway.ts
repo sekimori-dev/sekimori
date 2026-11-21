@@ -19,6 +19,7 @@ export type ExecuteResult = { executionId: string } & (
   | { status: "failed"; error: string; calls: CallRecord[] }
   | { status: "rejected"; error: string }
   | { status: "approval_required"; approvalId: string; approveAt: string; plan: string[]; reasons: string[] }
+  | { status: "approval_pending"; approvalId: string }
 );
 
 export type AuditEvent = { executionId: string; agent: string } & (
@@ -40,6 +41,7 @@ export interface GatewayOptions {
   notifyApprover: (approvalId: string) => string;
   audit: (event: AuditEvent) => void;
   limits: Limits;
+  approvalWaitMs: number;
 }
 
 function splitTool(qualified: string): { upstream: string; tool: string } {
@@ -110,6 +112,10 @@ export function createGateway(options: GatewayOptions) {
 
       let approved = false;
       if (approvalId) {
+        if (approvals.get(approvalId)?.plan.hash === plan.hash) {
+          await approvals.waitForDecision(approvalId, options.approvalWaitMs);
+          if (approvals.get(approvalId)?.status === "pending") return finish({ executionId, status: "approval_pending", approvalId });
+        }
         const consumed = approvals.consume(approvalId, plan.hash);
         if (!consumed.ok) return finish({ executionId, status: "rejected", error: consumed.error });
         approved = true;
