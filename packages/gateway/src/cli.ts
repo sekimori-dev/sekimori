@@ -6,12 +6,13 @@ import { parseArgs } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { openInBrowser, startApprovalPage } from "./approval-page.ts";
+import { approvalPorts, openInBrowser, startApprovalPage } from "./approval-page.ts";
 import { createApprovalStore } from "./approvals.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, type RemoteUpstreamConfig, type StdioUpstreamConfig } from "./config.ts";
+import { createCredentialStore, loadCredentialsKey } from "./credentials.ts";
 import { createGateway } from "./gateway.ts";
 import { createPolicy } from "./policy.ts";
-import { connectUpstream } from "./upstream.ts";
+import { connectUpstream, createRemotes } from "./upstream.ts";
 
 const { values, positionals } = parseArgs({
   options: { config: { type: "string", default: "sekimori.config.json" } },
@@ -40,13 +41,29 @@ if (positionals[0] === "approvals") {
 
 const { config, policyText } = await loadConfig(values.config);
 
-const upstreams = await Promise.all(config.upstreams.map(connectUpstream));
+const stdio = config.upstreams.filter((u): u is StdioUpstreamConfig => "command" in u);
+const remote = config.upstreams.filter((u): u is RemoteUpstreamConfig => "url" in u);
+const upstreams = await Promise.all(stdio.map(connectUpstream));
 // stdout carries the MCP protocol, so audit events go to stderr as JSON lines.
-const audit = (event: object) => process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
+const audit = (event: object) =>
+  process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), user: config.user, ...event })}\n`);
+
+let key: Promise<Buffer> | undefined;
+const credentials = createCredentialStore(sessionDir, config.user, () => (key ??= loadCredentialsKey(sessionDir)));
+let approvalPage: Awaited<ReturnType<typeof startApprovalPage>>;
+const remotes = createRemotes(remote, {
+  store: credentials,
+  redirectUris: approvalPorts(config.approvals.port).map((port) => `http://127.0.0.1:${port}/oauth/callback`),
+  redirectUrl: () => `http://127.0.0.1:${approvalPage.port}/oauth/callback`,
+  connectPage: (open) => approvalPage.connectPage(open),
+  connectTimeoutMs: 10_000,
+  audit,
+});
 
 const approvals = createApprovalStore(config.approvals.ttlMinutes * 60_000);
-const approvalPage = await startApprovalPage(approvals, {
+approvalPage = await startApprovalPage(approvals, {
   ...config.approvals,
+  remotes,
   onNotified: (approvalId, outcome) => audit({ type: "approver_notified", approvalId, outcome }),
 });
 const sessionFile = join(sessionDir, `approver-${approvalPage.port}.json`);
@@ -56,10 +73,12 @@ process.on("SIGUSR2", () => {
   openInBrowser(approvalPage.indexUrl).then((outcome) => audit({ type: "approver_notified", via: "signal", outcome }));
 });
 audit({ type: "approval_page", port: approvalPage.port });
+await remotes.start();
 
 const gateway = createGateway({
   agent: config.agent,
   upstreams,
+  remotes,
   classification: Object.fromEntries(config.upstreams.map((u) => [u.name, u.classify])),
   policy: createPolicy(policyText),
   approvals,
@@ -84,7 +103,7 @@ server.registerTool(
   "execute",
   {
     description:
-      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that Sekimori opened the request in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Then immediately call \`execute\` again with the identical code and the \`approvalId\`, without waiting for the user to reply: that call waits for their decision and runs the program once they approve. If it returns \`approval_pending\`, call it again the same way.`,
+      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that Sekimori opened the request in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Then immediately call \`execute\` again with the identical code and the \`approvalId\`, without waiting for the user to reply: that call waits for their decision and runs the program once they approve. If it returns \`approval_pending\`, call it again the same way. If the result has status \`connect_required\`, tell the user that Sekimori opened a page to connect the named services with their own account, then immediately call \`execute\` again with the identical code (no \`approvalId\`): that call waits for the connection. On \`connected\`, write the program again against the returned declarations; on \`connect_pending\`, call again the same way.`,
     inputSchema: {
       code: z.string().describe("TypeScript program body"),
       approvalId: z.string().optional().describe("Approval ID from an earlier approval_required result"),
@@ -101,6 +120,6 @@ await server.connect(new StdioServerTransport());
 process.stdin.on("close", async () => {
   approvalPage.close();
   await rm(sessionFile, { force: true });
-  await Promise.all(upstreams.map((u) => u.close()));
+  await Promise.all([...upstreams.map((u) => u.close()), remotes.close()]);
   process.exit(0);
 });

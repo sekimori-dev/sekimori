@@ -29,6 +29,7 @@ function gatewayWith(upstream: Upstream, policies: string, timeoutMs = 2_000) {
   const gateway = createGateway({
     agent: "test-agent",
     upstreams: [upstream],
+    remotes: { names: () => [], list: () => [], requestConnect: () => "", waitFor: async () => {} },
     classification: { mail: { trusted: [], untrusted: ["search"], sinks: ["send"] } },
     policy: createPolicy(policies),
     approvals,

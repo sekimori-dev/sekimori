@@ -1,9 +1,10 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ApprovalRequest, ApprovalStore } from "./approvals.ts";
+import type { Remotes, RemoteStatus } from "./upstream.ts";
 
 const escape = (value: string) =>
   value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -119,6 +120,17 @@ button.deny:hover { border-color: var(--beni); color: var(--beni-ink); }
 .index { padding: clamp(2rem, 5vw, 3.5rem) var(--gutter) 5rem; display: grid; gap: 2rem; max-width: 90rem; margin: 0 auto; }
 .index h1 { font-size: clamp(2.2rem, 3.4vw, 3rem); }
 .empty { color: var(--ink-2); }
+.index .lede { max-width: 38rem; font-size: 1.0625rem; color: var(--ink-2); }
+
+.links { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--ink); }
+.links li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0.25rem 2rem; padding: 1.1rem 0; border-bottom: 1px solid var(--hair); }
+.links form { margin: 0; grid-row: 1 / span 2; grid-column: 2; }
+.links .name { font-size: 1.0625rem; }
+.links .caption { overflow-wrap: anywhere; }
+.links .failed { color: var(--ink); }
+.links .state { grid-row: 1 / span 2; grid-column: 2; font-size: 0.875rem; color: var(--ink-2); }
+button.secondary { background: var(--paper); color: var(--ink); }
+button.secondary:hover { background: var(--ink); color: var(--paper); }
 
 @media (max-width: 60rem) {
   .layout { grid-template-columns: minmax(0, 1fr); }
@@ -130,6 +142,8 @@ button.deny:hover { border-color: var(--beni); color: var(--beni-ink); }
   .diagram.wide { display: none; }
   .diagram.narrow { display: block; }
   .queue a { grid-template-columns: minmax(0, 1fr); }
+  .links li { grid-template-columns: minmax(0, 1fr); }
+  .links form, .links .state { grid-row: auto; grid-column: 1; margin-top: 0.6rem; }
   .queue .when { grid-row: auto; grid-column: 1; }
   .queue .flow { white-space: normal; flex-wrap: wrap; }
 }
@@ -308,16 +322,57 @@ function indexPage(store: ApprovalStore): string {
   );
 }
 
+function connectionRow(remote: RemoteStatus): string {
+  const action = (label: string, cls = "") =>
+    `<form method="post" action="/connect/${remote.name}"><button${cls ? ` class="${cls}"` : ""}>${label}</button></form>`;
+  const [caption, side] =
+    remote.state === "connected"
+      ? [`${escape(remote.host)} · ${remote.upstream!.tools.length} tools`, `<span class="state">Connected</span>`]
+      : remote.state === "connecting"
+        ? [`${escape(remote.host)} · waiting for you to finish signing in`, action("Start again", "secondary")]
+        : remote.state === "unavailable"
+          ? [escape(remote.reason ?? "unreachable"), action("Retry", "secondary")]
+          : [`${escape(remote.host)} · not connected`, action("Connect")];
+  return `<li><span class="name">${escape(remote.name)}</span><span class="caption${remote.state === "unavailable" ? " failed" : ""}">${caption}</span>${side}</li>`;
+}
+
+function connectPage(remotes: Array<RemoteStatus>, pendingCount: number): string {
+  const open = remotes.filter((r) => r.state !== "connected").length;
+  return page(
+    "Connections",
+    `<main class="index"><h1>${remotes.length === 0 ? "No remote services are configured." : open === 0 ? "Every service is connected." : "Connect the services your agent works with."}</h1>
+      ${remotes.length ? `<p class="lede">Your agent acts as you, with your own accounts. Sekimori keeps the sign-in encrypted on this machine and never hands it to the agent.</p><ul class="links">${remotes.map(connectionRow).join("")}</ul>` : '<p class="empty">Remote MCP servers listed by URL in the gateway config appear here.</p>'}</main>`,
+    pendingCount,
+  );
+}
+
+// The callback request carried no cookie; navigating from this same-site page sends it again.
+const CALLBACK_DONE = page(
+  "Connected",
+  `<main class="index"><h1>Connected.</h1><p class="empty">Taking you back to your connections. <a href="/connect">Continue</a></p></main>
+   <script>location.replace("/connect")</script>`,
+);
+
+const CALLBACK_INVALID = page(
+  "Sign-in link not valid",
+  `<main class="index"><h1>This sign-in link is not valid.</h1>
+   <p class="empty">It was used already, expired after 10 minutes, or did not start from this gateway. Nothing was connected. <a href="/connect">Start again from your connections</a>.</p></main>`,
+);
+
 const FORBIDDEN = page(
   "Approver session needed",
   `<main class="index"><h1>This browser is not signed in as the approver.</h1>
    <p class="empty">Sekimori opens approval requests in your browser when an agent asks for one. If nothing opened, run <code>pnpm approvals</code> in the Sekimori repository.</p></main>`,
 );
 
-function cookieToken(req: IncomingMessage): string | null {
-  const match = (req.headers.cookie ?? "").match(/(?:^|;\s*)sekimori_approver=([\w-]+)/);
+// Browsers share cookies across ports, so each gateway's cookie carries its port in the name.
+function cookieToken(req: IncomingMessage, name: string): string | null {
+  const match = (req.headers.cookie ?? "").match(new RegExp(`(?:^|;\\s*)${name}=([\\w-]+)`));
   return match?.[1] ?? null;
 }
+
+// Every OAuth client is registered with the redirect URIs of this whole range; see the slice 3 spec, section 6.
+export const approvalPorts = (base: number) => Array.from({ length: 10 }, (_, i) => base + i);
 
 export function openInBrowser(url: string): Promise<string> {
   const [command, args] =
@@ -333,14 +388,27 @@ export function openInBrowser(url: string): Promise<string> {
 // through the opened URL and lives on as an HttpOnly cookie. See docs/superpowers/specs/2026-11-21-slice-2-approvals-design.md section 6.
 export async function startApprovalPage(
   store: ApprovalStore,
-  options: { port: number; openBrowser: boolean; onNotified: (approvalId: string, outcome: string) => void },
+  options: {
+    port: number;
+    openBrowser: boolean;
+    remotes: Pick<Remotes, "list" | "beginConnect" | "finishConnect">;
+    onNotified: (approvalId: string, outcome: string) => void;
+  },
 ) {
   let origin = `http://127.0.0.1:${options.port}`;
+  let cookie = `sekimori_approver_${options.port}`;
   const token = randomBytes(18).toString("base64url");
   const valid = (candidate: string | null) =>
     candidate !== null && candidate.length === token.length && timingSafeEqual(Buffer.from(candidate), Buffer.from(token));
 
   const server = createServer((req, res) => {
+    handle(req, res).catch((error: Error) => {
+      if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end(`Sekimori error: ${error.message}`);
+    });
+  });
+
+  async function handle(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? "/", origin);
     const send = (status: number, html: string) => {
       res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
@@ -356,12 +424,27 @@ export async function startApprovalPage(
     if (req.method === "GET" && valid(url.searchParams.get("t"))) {
       res.writeHead(303, {
         location: url.pathname,
-        "set-cookie": `sekimori_approver=${token}; HttpOnly; SameSite=Strict; Path=/`,
+        "set-cookie": `${cookie}=${token}; HttpOnly; SameSite=Strict; Path=/`,
         "cache-control": "no-store",
       });
       return res.end();
     }
-    if (!valid(cookieToken(req))) return send(403, FORBIDDEN);
+    // Arrives cross-site from the authorization server, so no Strict cookie: the single-use state is the credential.
+    if (req.method === "GET" && url.pathname === "/oauth/callback") {
+      const state = url.searchParams.get("state");
+      const code = url.searchParams.get("code");
+      const finished = state && code ? await options.remotes.finishConnect(state, code) : false;
+      return finished ? send(200, CALLBACK_DONE) : send(400, CALLBACK_INVALID);
+    }
+    if (!valid(cookieToken(req, cookie))) return send(403, FORBIDDEN);
+
+    const connect = req.method === "POST" ? url.pathname.match(/^\/connect\/([a-z][a-zA-Z0-9_]*)$/) : null;
+    if (connect) {
+      if (req.headers.origin !== origin) return send(403, FORBIDDEN);
+      if (!options.remotes.list().some((r) => r.name === connect[1])) return send(404, page("Not found", '<main class="index"><h1>Unknown upstream.</h1></main>'));
+      res.writeHead(303, { location: await options.remotes.beginConnect(connect[1]!) });
+      return res.end();
+    }
 
     const decision = req.method === "POST" ? url.pathname.match(/^\/a\/(ap_[\w-]+)\/(approve|deny)$/) : null;
     if (decision) {
@@ -373,6 +456,8 @@ export async function startApprovalPage(
     }
     if (req.method !== "GET") return send(405, page("Not allowed", '<main class="index"><h1>Method not allowed.</h1></main>'));
 
+    if (url.pathname === "/connect") return send(200, connectPage(options.remotes.list(), store.pending().length));
+
     const view = url.pathname.match(/^\/a\/(ap_[\w-]+)$/);
     if (view) {
       const request = store.get(view[1]!);
@@ -381,16 +466,22 @@ export async function startApprovalPage(
         : send(404, page("Not found", '<main class="index"><h1>Unknown approval.</h1></main>'));
     }
     return send(200, indexPage(store));
-  });
+  }
 
-  // Another gateway (e.g. a second Claude Code session) may hold the configured port; fall back to a free one.
+  // Another gateway (e.g. a second Claude Code session) may hold the configured port; try the next ones in the range.
+  const candidates = approvalPorts(options.port);
   const port = await new Promise<number>((resolve, reject) => {
-    const listen = (candidate: number) => server.listen(candidate, "127.0.0.1");
+    const listen = () => server.listen(candidates.shift(), "127.0.0.1");
     server.once("listening", () => resolve((server.address() as AddressInfo).port));
-    server.on("error", (error: NodeJS.ErrnoException) => (error.code === "EADDRINUSE" && server.listening === false ? listen(0) : reject(error)));
-    listen(options.port);
+    server.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EADDRINUSE" || server.listening) return reject(error);
+      if (candidates.length === 0) return reject(new Error(`Ports ${options.port}–${options.port + 9} are all taken by other Sekimori gateways`));
+      listen();
+    });
+    listen();
   });
   origin = `http://127.0.0.1:${port}`;
+  cookie = `sekimori_approver_${port}`;
 
   return {
     port,
@@ -401,6 +492,10 @@ export async function startApprovalPage(
         openInBrowser(`${origin}/a/${approvalId}?t=${token}`).then((outcome) => options.onNotified(approvalId, outcome));
       }
       return `${origin}/a/${approvalId}`;
+    },
+    connectPage(open: boolean): string {
+      if (open && options.openBrowser) openInBrowser(`${origin}/connect?t=${token}`).then((outcome) => options.onNotified("connect", outcome));
+      return `${origin}/connect`;
     },
     close: () => server.close(),
   };

@@ -5,7 +5,7 @@ import { renderDeclarations } from "./declarations.ts";
 import { classify, extractPlan, formatStep, planSteps, type Flow, type Plan, type ToolClass } from "./plan.ts";
 import type { Decision, Policy } from "./policy.ts";
 import { runProgram, type Bindings } from "./sandbox.ts";
-import type { Upstream } from "./upstream.ts";
+import type { Remotes, Upstream } from "./upstream.ts";
 
 export interface CallRecord {
   n: number;
@@ -20,6 +20,9 @@ export type ExecuteResult = { executionId: string } & (
   | { status: "rejected"; error: string }
   | { status: "approval_required"; approvalId: string; approveAt: string; plan: string[]; reasons: string[] }
   | { status: "approval_pending"; approvalId: string }
+  | { status: "connect_required"; upstreams: string[]; connectAt: string }
+  | { status: "connect_pending"; upstreams: string[] }
+  | { status: "connected"; upstreams: string[]; declarations: string }
 );
 
 export type AuditEvent = { executionId: string; agent: string } & (
@@ -35,6 +38,7 @@ export type AuditEvent = { executionId: string; agent: string } & (
 export interface GatewayOptions {
   agent: string;
   upstreams: Upstream[];
+  remotes: Pick<Remotes, "names" | "list" | "requestConnect" | "waitFor">;
   classification: Record<string, Classification>;
   policy: Policy;
   approvals: ApprovalStore;
@@ -50,9 +54,11 @@ function splitTool(qualified: string): { upstream: string; tool: string } {
 }
 
 export function createGateway(options: GatewayOptions) {
-  const { agent, upstreams, policy, approvals, audit, limits } = options;
-  const declarations = renderDeclarations(upstreams);
-  const namespaces = new Set(upstreams.map((u) => u.name));
+  const { agent, upstreams, remotes, policy, approvals, audit, limits } = options;
+  const namespaces = new Set([...upstreams.map((u) => u.name), ...remotes.names()]);
+  // Code hash -> remote upstreams that program was told to connect; its resubmit waits for them.
+  const pendingConnects = new Map<string, string[]>();
+  const connected = () => [...upstreams, ...remotes.list().flatMap((r) => (r.upstream ? [r.upstream] : []))];
   // Results reach the model, so an untrusted read taints every later program in this agent session.
   const sessionUntrusted = new Set<string>();
 
@@ -86,7 +92,16 @@ export function createGateway(options: GatewayOptions) {
   }
 
   return {
-    describe: () => declarations,
+    describe(): string {
+      const notes = remotes.list().flatMap((r) =>
+        r.state === "connected"
+          ? []
+          : r.state === "unavailable"
+            ? [`// Unavailable: ${r.name} (${r.reason}). Programs that use \`${r.name}\` are rejected.`]
+            : [`// Not connected yet: ${r.name}. A program that uses \`${r.name}\` asks the user to connect it.`],
+      );
+      return [renderDeclarations(connected()), ...notes].filter(Boolean).join("\n\n");
+    },
 
     async execute(code: string, approvalId?: string): Promise<ExecuteResult> {
       const executionId = randomUUID();
@@ -108,6 +123,31 @@ export function createGateway(options: GatewayOptions) {
       } catch (error) {
         return finish({ executionId, status: "rejected", error: (error as Error).message });
       }
+
+      const waitingFor = pendingConnects.get(plan.hash);
+      if (waitingFor) {
+        await remotes.waitFor(waitingFor, options.approvalWaitMs);
+        const waited = remotes.list().filter((r) => waitingFor.includes(r.name));
+        const failed = waited.find((r) => r.state === "unavailable");
+        if (failed) {
+          pendingConnects.delete(plan.hash);
+          return finish({ executionId, status: "rejected", error: `Upstream ${failed.name} is unavailable: ${failed.reason}` });
+        }
+        const ready = waited.filter((r) => r.upstream);
+        if (ready.length < waitingFor.length) return finish({ executionId, status: "connect_pending", upstreams: waitingFor });
+        pendingConnects.delete(plan.hash);
+        return finish({ executionId, status: "connected", upstreams: waitingFor, declarations: renderDeclarations(ready.map((r) => r.upstream!)) });
+      }
+      const used = new Set(plan.calls.map((c) => splitTool(c.tool).upstream));
+      const missing = remotes.list().filter((r) => used.has(r.name) && r.state !== "connected");
+      const unavailable = missing.find((r) => r.state === "unavailable");
+      if (unavailable) return finish({ executionId, status: "rejected", error: `Upstream ${unavailable.name} is unavailable: ${unavailable.reason}` });
+      if (missing.length > 0) {
+        const names = missing.map((r) => r.name);
+        pendingConnects.set(plan.hash, names);
+        return finish({ executionId, status: "connect_required", upstreams: names, connectAt: remotes.requestConnect(names) });
+      }
+
       const { reasons, flows, denied } = approvalReasons(plan);
       audit({ type: "plan", executionId, agent, hash: plan.hash, calls: plan.calls.length, open: plan.open, reasons });
       if (denied) return finish({ executionId, status: "rejected", error: denied });
@@ -152,7 +192,7 @@ export function createGateway(options: GatewayOptions) {
       };
 
       const bindings: Bindings = Object.fromEntries(
-        upstreams.map((upstream) => [
+        connected().map((upstream) => [
           upstream.name,
           Object.fromEntries(
             upstream.tools.map((tool) => [
