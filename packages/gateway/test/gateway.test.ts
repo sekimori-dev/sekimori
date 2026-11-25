@@ -140,6 +140,21 @@ describe("approvals and grants", () => {
     expect(received.map((r) => r.tool)).toEqual(["search"]);
   });
 
+  it("asks up front when policy requires approval for a call whose arguments are only known at runtime", async () => {
+    const { upstream, received } = fakeMail();
+    const { gateway } = gatewayWith(
+      upstream,
+      `permit(principal == Agent::"test-agent", action == Action::"call", resource) when { context.tool == "search" };
+       @approval("required")
+       permit(principal == Agent::"test-agent", action == Action::"call", resource == Tool::"mail.send");`,
+    );
+
+    const computed = await gateway.execute(`const to = ["team", "example.com"].join("@"); await mail.send({ to });`);
+
+    expect(computed).toMatchObject({ status: "approval_required", reasons: ["Policy requires approval for mail.send"] });
+    expect(received).toEqual([]);
+  });
+
   it("requires approval for calls it cannot read statically and rejects eval outright", async () => {
     const { upstream } = fakeMail();
     const { gateway } = gatewayWith(upstream, permitAll);

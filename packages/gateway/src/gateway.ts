@@ -71,9 +71,10 @@ export function createGateway(options: GatewayOptions) {
   function approvalReasons(plan: Plan): { reasons: string[]; flows: Flow[]; denied?: string } {
     const reasons: string[] = [];
     const flows: Flow[] = [];
-    for (const call of plan.calls.filter((c) => !c.runtimeArgs)) {
+    for (const call of plan.calls) {
+      // With runtime arguments only the static ones are known, so a deny here is not final; Cedar decides again at runtime.
       const decision = policy.authorizeCall({ agent, ...splitTool(call.tool), args: call.args });
-      if (!decision.allowed) return { reasons, flows, denied: `Denied by policy: ${call.tool}` };
+      if (!decision.allowed && !call.runtimeArgs) return { reasons, flows, denied: `Denied by policy: ${call.tool}` };
       if (decision.approvalRequired) reasons.push(`Policy requires approval for ${call.tool}`);
     }
     const planned = plan.calls.map((c) => c.tool).filter((t) => classOf(t).source === "untrusted");
@@ -211,6 +212,7 @@ export function createGateway(options: GatewayOptions) {
                 calls.push(record);
                 try {
                   if (!decision.allowed) throw new Error(`Denied by policy: ${qualified}`);
+                  if (decision.approvalRequired && !approved) throw new Error(`Policy requires approval: ${qualified}`);
                   if (classOf(qualified).source === "untrusted") {
                     untrustedSeen.add(qualified);
                     sessionUntrusted.add(qualified);
