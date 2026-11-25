@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { RequestFields } from "./activity.ts";
 import type { ApprovalStore } from "./approvals.ts";
 import type { Classification, Limits } from "./config.ts";
 import { renderDeclarations } from "./declarations.ts";
@@ -44,8 +45,17 @@ export interface GatewayOptions {
   approvals: ApprovalStore;
   notifyApprover: (approvalId: string) => string;
   audit: (event: AuditEvent) => void;
+  record: (request: RequestFields) => void;
   limits: Limits;
   approvalWaitMs: number;
+}
+
+// Program errors can carry tool output, so only messages the gateway itself wrote go into the activity log.
+const GATEWAY_ERROR = /^(\w+: )?((Denied by policy|Policy requires approval|Call outside the plan|Not covered by a grant or approval): [\w.-]+|Program exceeded the \d+ ms limit)$/;
+function loggableError(result: ExecuteResult): string | undefined {
+  if (result.status === "rejected") return result.error;
+  if (result.status !== "failed") return undefined;
+  return GATEWAY_ERROR.test(result.error) ? result.error : `Program failed (${/^(\w+):/.exec(result.error)?.[1] ?? "Error"})`;
 }
 
 function splitTool(qualified: string): { upstream: string; tool: string } {
@@ -106,7 +116,20 @@ export function createGateway(options: GatewayOptions) {
 
     async execute(code: string, approvalId?: string): Promise<ExecuteResult> {
       const executionId = randomUUID();
+      let planned: Pick<RequestFields, "hash" | "steps" | "open"> = {};
       const finish = (result: ExecuteResult): ExecuteResult => {
+        const id = "approvalId" in result ? result.approvalId : approvalId;
+        options.record({
+          executionId,
+          status: result.status,
+          ...planned,
+          reasons: "reasons" in result ? result.reasons : undefined,
+          approvalId: id,
+          expiresAt: id ? approvals.get(id)?.expiresAt : undefined,
+          upstreams: "upstreams" in result ? result.upstreams : undefined,
+          calls: "calls" in result ? result.calls.length : 0,
+          error: loggableError(result),
+        });
         audit({
           type: "execution",
           executionId,
@@ -124,6 +147,14 @@ export function createGateway(options: GatewayOptions) {
       } catch (error) {
         return finish({ executionId, status: "rejected", error: (error as Error).message });
       }
+      planned = { hash: plan.hash, steps: planSteps(plan, classOf), open: plan.open };
+      options.record({
+        executionId,
+        status: approvalId || pendingConnects.has(plan.hash) ? "waiting" : "running",
+        ...planned,
+        approvalId,
+        expiresAt: approvalId ? approvals.get(approvalId)?.expiresAt : undefined,
+      });
 
       const waitingFor = pendingConnects.get(plan.hash);
       if (waitingFor) {
@@ -163,7 +194,7 @@ export function createGateway(options: GatewayOptions) {
         approved = true;
         audit({ type: "approval_used", executionId, agent, approvalId });
       } else if (reasons.length > 0) {
-        const steps = planSteps(plan, classOf);
+        const steps = planned.steps!;
         const request = approvals.request({ agent, code, plan, steps, flows, reasons });
         audit({ type: "approval_requested", executionId, agent, approvalId: request.id });
         return finish({

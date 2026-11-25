@@ -6,10 +6,11 @@ import { parseArgs } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { approvalPorts, openInBrowser, startApprovalPage } from "./approval-page.ts";
+import { createActivityLog } from "./activity.ts";
 import { createApprovalStore } from "./approvals.ts";
 import { loadConfig, type RemoteUpstreamConfig, type StdioUpstreamConfig } from "./config.ts";
 import { createCredentialStore, loadCredentialsKey } from "./credentials.ts";
+import { approvalPorts, openInBrowser, startDashboard, verifiedGateway } from "./dashboard.ts";
 import { createGateway } from "./gateway.ts";
 import { createPolicy } from "./policy.ts";
 import { connectUpstream, createRemotes } from "./upstream.ts";
@@ -19,7 +20,7 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
 });
 
-// Running gateways leave a file with only their port and pid; the approver token never leaves gateway memory.
+// Running gateways leave a file with only their port, pid and user; the approver token never leaves gateway memory.
 const sessionDir = join(homedir(), ".sekimori");
 const approvalsCommand = `node ${import.meta.filename} approvals`;
 
@@ -27,11 +28,12 @@ if (positionals[0] === "approvals") {
   const files = (await readdir(sessionDir).catch(() => [])).filter((f) => f.startsWith("approver-"));
   if (files.length === 0) console.log("No running Sekimori gateway found.");
   for (const file of files) {
-    const { port, pid } = JSON.parse(await readFile(join(sessionDir, file), "utf8"));
-    try {
-      process.kill(pid, "SIGUSR2");
-      console.log(`Asked the gateway on port ${port} to open its approvals in your browser.`);
-    } catch {
+    const { port } = JSON.parse(await readFile(join(sessionDir, file), "utf8"));
+    const gateway = await verifiedGateway(sessionDir, port);
+    if (gateway) {
+      process.kill(gateway.pid, "SIGUSR2");
+      console.log(`Asked the gateway on port ${port} to open its dashboard in your browser.`);
+    } else {
       await rm(join(sessionDir, file), { force: true });
       console.log(`Removed a stale entry for port ${port}.`);
     }
@@ -50,29 +52,39 @@ const audit = (event: object) =>
 
 let key: Promise<Buffer> | undefined;
 const credentials = createCredentialStore(sessionDir, config.user, () => (key ??= loadCredentialsKey(sessionDir)));
-let approvalPage: Awaited<ReturnType<typeof startApprovalPage>>;
+let dashboard: Awaited<ReturnType<typeof startDashboard>>;
 const remotes = createRemotes(remote, {
   store: credentials,
   redirectUris: approvalPorts(config.approvals.port).map((port) => `http://127.0.0.1:${port}/oauth/callback`),
-  redirectUrl: () => `http://127.0.0.1:${approvalPage.port}/oauth/callback`,
-  connectPage: (open) => approvalPage.connectPage(open),
+  redirectUrl: () => `http://127.0.0.1:${dashboard.port}/oauth/callback`,
+  connectPage: (open) => dashboard.connectPage(open),
   connectTimeoutMs: 10_000,
   audit,
+  onChange: (status) => dashboard.append({ kind: "connection", upstream: status.name, state: status.state, reason: status.reason }),
 });
 
+const activity = createActivityLog(sessionDir, config.user);
+await activity.prune();
 const approvals = createApprovalStore(config.approvals.ttlMinutes * 60_000);
-approvalPage = await startApprovalPage(approvals, {
+dashboard = await startDashboard(approvals, {
   ...config.approvals,
+  agent: config.agent,
+  user: config.user,
+  sessionDir,
+  activity,
+  local: upstreams,
   remotes,
   onNotified: (approvalId, outcome) => audit({ type: "approver_notified", approvalId, outcome }),
 });
-const sessionFile = join(sessionDir, `approver-${approvalPage.port}.json`);
+const sessionFile = join(sessionDir, `approver-${dashboard.port}.json`);
 await mkdir(sessionDir, { recursive: true, mode: 0o700 });
-await writeFile(sessionFile, JSON.stringify({ port: approvalPage.port, pid: process.pid }), { mode: 0o600 });
+await writeFile(sessionFile, JSON.stringify({ port: dashboard.port, pid: process.pid, user: config.user }), { mode: 0o600 });
 process.on("SIGUSR2", () => {
-  openInBrowser(approvalPage.indexUrl).then((outcome) => audit({ type: "approver_notified", via: "signal", outcome }));
+  openInBrowser(dashboard.indexUrl).then((outcome) => audit({ type: "approver_notified", via: "signal", outcome }));
 });
-audit({ type: "approval_page", port: approvalPage.port });
+audit({ type: "approval_page", port: dashboard.port });
+await dashboard.append({ kind: "session", state: "started" });
+for (const upstream of upstreams) await dashboard.append({ kind: "connection", upstream: upstream.name, state: "connected" });
 await remotes.start();
 
 const gateway = createGateway({
@@ -82,8 +94,9 @@ const gateway = createGateway({
   classification: Object.fromEntries(config.upstreams.map((u) => [u.name, u.classify])),
   policy: createPolicy(policyText),
   approvals,
-  notifyApprover: approvalPage.announce,
+  notifyApprover: dashboard.announce,
   audit,
+  record: (request) => dashboard.append({ kind: "request", ...request }),
   limits: config.limits,
   approvalWaitMs: config.approvals.waitSeconds * 1000,
 });
@@ -103,7 +116,7 @@ server.registerTool(
   "execute",
   {
     description:
-      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that Sekimori opened the request in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Then immediately call \`execute\` again with the identical code and the \`approvalId\`, without waiting for the user to reply: that call waits for their decision and runs the program once they approve. If it returns \`approval_pending\`, call it again the same way. If the result has status \`connect_required\`, tell the user that Sekimori opened a page to connect the named services with their own account, then immediately call \`execute\` again with the identical code (no \`approvalId\`): that call waits for the connection. On \`connected\`, write the program again against the returned declarations; on \`connect_pending\`, call again the same way.`,
+      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that the request is waiting in the Sekimori dashboard in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Then immediately call \`execute\` again with the identical code and the \`approvalId\`, without waiting for the user to reply: that call waits for their decision and runs the program once they approve. If it returns \`approval_pending\`, call it again the same way. If the result has status \`connect_required\`, tell the user that Sekimori opened a page to connect the named services with their own account, then immediately call \`execute\` again with the identical code (no \`approvalId\`): that call waits for the connection. On \`connected\`, write the program again against the returned declarations; on \`connect_pending\`, call again the same way.`,
     inputSchema: {
       code: z.string().describe("TypeScript program body"),
       approvalId: z.string().optional().describe("Approval ID from an earlier approval_required result"),
@@ -118,7 +131,8 @@ server.registerTool(
 await server.connect(new StdioServerTransport());
 
 process.stdin.on("close", async () => {
-  approvalPage.close();
+  await dashboard.append({ kind: "session", state: "stopped" });
+  dashboard.close();
   await rm(sessionFile, { force: true });
   await Promise.all([...upstreams.map((u) => u.close()), remotes.close()]);
   process.exit(0);

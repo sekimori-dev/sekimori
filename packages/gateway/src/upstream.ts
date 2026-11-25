@@ -99,6 +99,7 @@ export function createRemotes(
     connectPage: (open: boolean) => string;
     connectTimeoutMs: number;
     audit: (event: RemoteEvent) => void;
+    onChange: (status: RemoteStatus) => void;
   },
 ) {
   type Entry = { config: RemoteUpstreamConfig; status: RemoteStatus; client?: Client; openedAt?: number };
@@ -122,6 +123,7 @@ export function createRemotes(
     entry.status = { name: entry.config.name, host: entry.status.host, ...status };
     if (status.state === "needs_connect") options.audit({ type: "upstream_needs_connect", upstream: entry.config.name, reason: status.reason! });
     if (status.state === "unavailable") options.audit({ type: "upstream_unavailable", upstream: entry.config.name, reason: status.reason! });
+    options.onChange(entry.status);
     for (const wake of waiters) wake();
   }
 
@@ -199,14 +201,14 @@ export function createRemotes(
         const result = await auth(provider, { serverUrl: entry.config.url });
         if (result === "AUTHORIZED" || !provider.authorizationUrl) {
           await connect(entry);
-          return "/connect";
+          return "/connections";
         }
         attempts.set(state, { name, provider, expiresAt: Date.now() + STATE_TTL_MS });
         settle(entry, { state: "connecting" });
         return provider.authorizationUrl.href;
       } catch (error) {
         settle(entry, { state: "unavailable", reason: (error as Error).message });
-        return "/connect";
+        return "/connections";
       }
     },
 

@@ -37,6 +37,7 @@ function gatewayWith(upstream: Upstream, policies: string, timeoutMs = 2_000, re
     approvals,
     notifyApprover: (id) => `http://approvals.test/a/${id}`,
     audit: (event) => events.push(event),
+    record: () => {},
     limits: { timeoutMs, memoryBytes: 32 * 1024 * 1024 },
     approvalWaitMs: 1_000,
   });

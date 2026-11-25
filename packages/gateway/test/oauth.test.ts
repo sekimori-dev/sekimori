@@ -8,9 +8,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { approvalPorts, startApprovalPage } from "../src/approval-page.ts";
+import { createActivityLog } from "../src/activity.ts";
 import { createApprovalStore } from "../src/approvals.ts";
 import { createCredentialStore } from "../src/credentials.ts";
+import { approvalPorts, startDashboard } from "../src/dashboard.ts";
 import { createGateway } from "../src/gateway.ts";
 import { createPolicy } from "../src/policy.ts";
 import { createRemotes } from "../src/upstream.ts";
@@ -116,7 +117,7 @@ async function setup() {
   const basePort = 48_000 + Math.floor(Math.random() * 100) * 10;
   const classification = { trusted: ["search"], untrusted: [], sinks: [] };
 
-  let page: Awaited<ReturnType<typeof startApprovalPage>>;
+  let page: Awaited<ReturnType<typeof startDashboard>>;
   const newRemotes = () =>
     createRemotes([{ name: "tracker", url: fake.url, classify: classification }], {
       store,
@@ -125,9 +126,20 @@ async function setup() {
       connectPage: (open) => page.connectPage(open),
       connectTimeoutMs: 5_000,
       audit: () => {},
+      onChange: () => {},
     });
   const remotes = newRemotes();
-  page = await startApprovalPage(approvals, { port: basePort, openBrowser: false, remotes, onNotified: () => {} });
+  page = await startDashboard(approvals, {
+    port: basePort,
+    openBrowser: false,
+    agent: "test-agent",
+    user: "tester",
+    sessionDir: dir,
+    activity: createActivityLog(dir, "tester"),
+    local: [],
+    remotes,
+    onNotified: () => {},
+  });
   const origin = `http://127.0.0.1:${page.port}`;
   const cookie = (await fetch(page.indexUrl, { redirect: "manual" })).headers.get("set-cookie")!.split(";")[0]!;
   cleanups.push(() => rm(dir, { recursive: true, force: true }), fake.close, page.close, remotes.close);
@@ -141,13 +153,14 @@ async function setup() {
     approvals,
     notifyApprover: (id) => id,
     audit: () => {},
+    record: () => {},
     limits: { timeoutMs: 5_000, memoryBytes: 32 * 1024 * 1024 },
     approvalWaitMs: 3_000,
   });
 
   // Plays the human in the browser: the Connect button, the authorization server's redirect, then the callback.
   async function signIn(): Promise<Response> {
-    const start = await fetch(`${origin}/connect/tracker`, { method: "POST", redirect: "manual", headers: { cookie, origin } });
+    const start = await fetch(`${origin}/connections/tracker`, { method: "POST", redirect: "manual", headers: { cookie, origin } });
     const authorize = await fetch(start.headers.get("location")!, { redirect: "manual" });
     return fetch(authorize.headers.get("location")!, { redirect: "manual" });
   }
@@ -163,11 +176,11 @@ describe("per-user OAuth to remote MCP servers", () => {
     const { gateway, origin, cookie, signIn } = await setup();
 
     expect(gateway.describe()).toContain("Not connected yet: tracker");
-    expect(await gateway.execute(program)).toMatchObject({ status: "connect_required", upstreams: ["tracker"], connectAt: `${origin}/connect` });
+    expect(await gateway.execute(program)).toMatchObject({ status: "connect_required", upstreams: ["tracker"], connectAt: `${origin}/connections` });
 
     const waiting = gateway.execute(program);
     expect((await signIn()).status).toBe(200);
-    expect(await (await fetch(`${origin}/connect`, { headers: { cookie } })).text()).toContain("Every service is connected.");
+    expect(await (await fetch(`${origin}/connections`, { headers: { cookie } })).text()).toContain("Every service is connected.");
     expect(await waiting).toMatchObject({ status: "connected", upstreams: ["tracker"], declarations: expect.stringContaining('"search"(') });
 
     expect(await gateway.execute(program)).toMatchObject({ status: "completed", value: "found disk" });

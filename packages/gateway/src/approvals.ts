@@ -9,15 +9,21 @@ export interface ApprovalRequest {
   steps: PlanStep[];
   flows: Flow[];
   reasons: string[];
-  status: "pending" | "approved" | "denied" | "used";
+  status: "pending" | "approved" | "denied" | "used" | "expired";
   expiresAt: number;
 }
 
 export type ApprovalStore = ReturnType<typeof createApprovalStore>;
 
+export type ApprovalChange = { type: "requested" | "approved" | "denied" | "used" | "expired"; request: ApprovalRequest };
+
 export function createApprovalStore(ttlMs: number, now: () => number = Date.now) {
   const requests = new Map<string, ApprovalRequest>();
   const waiters = new Map<string, Set<() => void>>();
+  const listeners = new Set<(change: ApprovalChange) => void>();
+  const emit = (change: ApprovalChange) => {
+    for (const listener of listeners) listener(change);
+  };
 
   return {
     request(fields: Pick<ApprovalRequest, "agent" | "code" | "plan" | "steps" | "flows" | "reasons">): ApprovalRequest {
@@ -28,6 +34,7 @@ export function createApprovalStore(ttlMs: number, now: () => number = Date.now)
         expiresAt: now() + ttlMs,
       };
       requests.set(request.id, request);
+      emit({ type: "requested", request });
       return request;
     },
 
@@ -41,6 +48,7 @@ export function createApprovalStore(ttlMs: number, now: () => number = Date.now)
       request.status = approve ? "approved" : "denied";
       for (const wake of waiters.get(id) ?? []) wake();
       waiters.delete(id);
+      emit({ type: request.status, request });
       return request;
     },
 
@@ -67,7 +75,22 @@ export function createApprovalStore(ttlMs: number, now: () => number = Date.now)
       if (request.status === "denied") return { ok: false, error: `Approval ${id} was denied` };
       if (request.status === "used") return { ok: false, error: `Approval ${id} was already used` };
       request.status = "used";
+      emit({ type: "used", request });
       return { ok: true, request };
+    },
+
+    onChange(listener: (change: ApprovalChange) => void): void {
+      listeners.add(listener);
+    },
+
+    // Marks approvals that ran out undecided, or approved but never used, as expired.
+    sweep(): void {
+      for (const request of requests.values()) {
+        if ((request.status === "pending" || request.status === "approved") && request.expiresAt <= now()) {
+          request.status = "expired";
+          emit({ type: "expired", request });
+        }
+      }
     },
   };
 }
