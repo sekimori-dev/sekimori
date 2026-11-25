@@ -2,11 +2,16 @@
 permit (principal == Agent::"claude-code", action == Action::"call", resource)
 when { context.upstream == "fs" };
 
-// ...and Jira, through the developer's own Atlassian account.
+// ...and Notion, through the developer's own account...
 permit (principal == Agent::"claude-code", action == Action::"call", resource)
-when { context.upstream == "jira" };
+when { context.upstream == "notion" };
 
-// ...but never edit, move or create anything.
+// ...where every change to the workspace asks a human first.
+@approval("required")
+permit (principal == Agent::"claude-code", action == Action::"call", resource)
+when { context.upstream == "notion" && !(context.tool like "notion-search" || context.tool like "notion-fetch" || context.tool like "notion-get-*" || context.tool like "notion-query-*" || context.tool like "notion-list-*") };
+
+// ...but never edit, move or create files or directories.
 forbid (principal, action == Action::"call", resource)
 when { context.tool like "edit*" || context.tool like "move*" || context.tool like "create*" };
 

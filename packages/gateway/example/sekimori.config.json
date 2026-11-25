@@ -13,12 +13,11 @@
       }
     },
     {
-      "name": "jira",
-      "url": "https://mcp.atlassian.com/v2/mcp",
+      "name": "notion",
+      "url": "https://mcp.notion.com/mcp",
       "classify": {
-        "trusted": ["atlassianUserInfo", "getAccessibleAtlassianResources", "getVisibleJiraProjects"],
-        "untrusted": ["get*", "search*", "fetch", "lookup*"],
-        "sinks": ["create*", "edit*", "update*", "add*", "transition*"]
+        "untrusted": ["notion-search", "notion-fetch", "notion-get-*", "notion-query-*", "notion-list-*"],
+        "sinks": ["notion-create-*", "notion-update-*", "notion-move-*", "notion-duplicate-*", "notion-delete-*", "notion-set-*", "notion-restore-*"]
       }
     }
   ],
