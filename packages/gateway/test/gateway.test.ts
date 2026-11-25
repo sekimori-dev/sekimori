@@ -70,6 +70,16 @@ describe("sandbox and policy", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "execution", status: "rejected" }));
   });
 
+  it("finishes a program that makes no tool calls, and one that fails before its first call", async () => {
+    const { upstream } = fakeMail();
+    const { gateway } = gatewayWith(upstream, permitAll, 5_000);
+
+    const started = Date.now();
+    expect(await gateway.execute(`return 1 + 1;`)).toMatchObject({ status: "completed", value: 2 });
+    expect(await gateway.execute(`throw new Error("boom");`)).toMatchObject({ status: "failed", error: "Error: boom" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it("interrupts a runaway program at the time limit", async () => {
     const { upstream } = fakeMail();
     const { gateway } = gatewayWith(upstream, permitAll, 200);

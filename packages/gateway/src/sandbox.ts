@@ -78,7 +78,10 @@ export async function runProgram(code: string, bindings: Bindings, limits: Limit
     const timeout = new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), limits.timeoutMs);
     });
-    const settled = await Promise.race([context.resolvePromise(promise), timeout]);
+    const resolved = context.resolvePromise(promise);
+    // Without this, a program that settles before its first host call never resolves; host calls drain the queue later.
+    runtime.executePendingJobs();
+    const settled = await Promise.race([resolved, timeout]);
     promise.dispose();
     if (settled === "timeout") return { ok: false, error: `Program exceeded the ${limits.timeoutMs} ms limit` };
     if (settled.error) {
