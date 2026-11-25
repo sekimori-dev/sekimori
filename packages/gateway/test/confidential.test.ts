@@ -141,4 +141,30 @@ describe("confidential data", () => {
     expect(await gateway.execute(average, held.approvalId)).toMatchObject({ status: "completed", value: 56500 });
     expect(received.filter((r) => r.tool === "payroll.list_employees")).toHaveLength(reads);
   });
+
+  it("catches reformatted values going out, asks when a reveal grant requires approval, and holds results the approver was not told about", async () => {
+    const { gateway, received } = gatewayWith();
+    const compact = await gateway.execute(`${read} await slack.post({ text: rows[0].iban.replace(/ /g, "").toLowerCase() });`);
+    const inText = await gateway.execute(`${read} await slack.post({ text: "Mara earns " + String(rows[0].salary).replace(/(\\d{2})(\\d{3})/, "$1.$2") });`);
+    expect(compact).toMatchObject({ status: "failed", error: expect.stringContaining("Confidential bank value may not be sent to slack.post") });
+    expect(inText).toMatchObject({ status: "failed", error: expect.stringContaining("Confidential payroll value may not be sent to slack.post") });
+    expect(received.filter((r) => r.tool === "slack.post")).toEqual([]);
+
+    const annotated = gatewayWith(`${permitCalls}
+      @approval("required")
+      permit(principal == Agent::"assistant", action == Action::"reveal", resource == Tool::"slack.post");`);
+    const placeholder = (await value(annotated.gateway, `${read} return rows[0].iban;`)) as string;
+    expect(await annotated.gateway.execute(`await slack.post({ text: "${placeholder}" });`)).toMatchObject({ status: "approval_required" });
+
+    const flow = gatewayWith(`${permitCalls}`);
+    await value(flow.gateway, `return await files.read_file({});`);
+    const mixed = `${read} await slack.post({ text: "summary" }); return rows.length;`;
+    const first = await flow.gateway.execute(mixed);
+    if (first.status !== "approval_required") throw new Error("expected a flow approval");
+    flow.approvals.decide(first.approvalId, true);
+    expect(await flow.gateway.execute(mixed, first.approvalId)).toMatchObject({
+      status: "approval_required",
+      reasons: ["Result computed from confidential data after untrusted input"],
+    });
+  });
 });

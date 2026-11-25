@@ -166,6 +166,9 @@ function readings(token: string): number[] {
   return [Number(plain.replace(/,/g, "")), Number(plain.replace(/\./g, "").replace(",", "."))].filter(Number.isFinite);
 }
 
+// Forwarding compares values with spacing, separators and case removed, since programs reformat what they pass on.
+const normal = (text: string) => text.toLowerCase().replace(/[\s.,'_/-]/g, "");
+
 function parseJson(text: string): unknown {
   const trimmed = text.trim();
   if (!/^[[{]/.test(trimmed)) return undefined;
@@ -322,7 +325,12 @@ export function createConfidential(classes: DataClass[]) {
             note({ ...whole.origin, placeholder: node });
             return whole.value;
           }
-          for (const [value, origin] of knownStrings) if (node.includes(value)) note(origin);
+          const flat = normal(node);
+          for (const [value, origin] of knownStrings) if (normal(value).length >= 4 && flat.includes(normal(value))) note(origin);
+          for (const number of node.match(NUMBER_TOKEN) ?? []) {
+            const hit = readings(number).find((n) => knownNumbers.has(n));
+            if (hit !== undefined) note(knownNumbers.get(hit)!);
+          }
           return node.replace(PLACEHOLDER, (placeholder) => {
             const entry = vault.get(placeholder);
             if (!entry) return placeholder;
