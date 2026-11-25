@@ -9,6 +9,7 @@ import { z } from "zod";
 import { createActivityLog } from "./activity.ts";
 import { createApprovalStore } from "./approvals.ts";
 import { loadConfig, type RemoteUpstreamConfig, type StdioUpstreamConfig } from "./config.ts";
+import { createConfidential, resolveClasses } from "./confidential.ts";
 import { createCredentialStore, loadCredentialsKey } from "./credentials.ts";
 import { approvalPorts, openInBrowser, startDashboard, verifiedGateway } from "./dashboard.ts";
 import { createGateway } from "./gateway.ts";
@@ -93,6 +94,7 @@ const gateway = createGateway({
   remotes,
   classification: Object.fromEntries(config.upstreams.map((u) => [u.name, u.classify])),
   policy: createPolicy(policyText),
+  confidential: createConfidential(resolveClasses(config.confidential.classes)),
   approvals,
   notifyApprover: dashboard.announce,
   audit,
@@ -116,7 +118,7 @@ server.registerTool(
   "execute",
   {
     description:
-      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that the request is waiting in the Sekimori dashboard in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Then immediately call \`execute\` again with the identical code and the \`approvalId\`, without waiting for the user to reply: that call waits for their decision and runs the program once they approve. If it returns \`approval_pending\`, call it again the same way. If the result has status \`connect_required\`, tell the user that Sekimori opened a page to connect the named services with their own account, then immediately call \`execute\` again with the identical code (no \`approvalId\`): that call waits for the connection. On \`connected\`, write the program again against the returned declarations; on \`connect_pending\`, call again the same way.`,
+      `Runs a TypeScript program in Sekimori's sandbox. The namespaces from \`describe_api\` are globals; use top-level await and \`return\` the value you need. Every tool call is checked against policy. If the result has status \`approval_required\`, tell the user that the request is waiting in the Sekimori dashboard in their browser and show the plan and reasons. If nothing opened, the user can run \`${approvalsCommand}\` in a terminal (in Claude Code: \`! ${approvalsCommand}\`). Then immediately call \`execute\` again with the identical code and the \`approvalId\`, without waiting for the user to reply: that call waits for their decision and runs the program once they approve. If it returns \`approval_pending\`, call it again the same way. If the result has status \`connect_required\`, tell the user that Sekimori opened a page to connect the named services with their own account, then immediately call \`execute\` again with the identical code (no \`approvalId\`): that call waits for the connection. On \`connected\`, write the program again against the returned declarations; on \`connect_pending\`, call again the same way. Confidential values never reach you raw: a \`confidential\` field in the result counts what Sekimori withheld or replaced by placeholders. Compute inside the program and return results; pass \`⟦class·id⟧\` placeholders on to tools as they are.`,
     inputSchema: {
       code: z.string().describe("TypeScript program body"),
       approvalId: z.string().optional().describe("Approval ID from an earlier approval_required result"),

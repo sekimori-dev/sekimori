@@ -1,5 +1,12 @@
 import { randomBytes } from "node:crypto";
+import type { Counts, Reveal } from "./confidential.ts";
+import type { CallRecord } from "./gateway.ts";
 import type { Flow, Plan, PlanStep } from "./plan.ts";
+
+// A result held at the checkpoint: already scrubbed, returned on approval without running the program again.
+export type HeldResult =
+  | { status: "completed"; value: unknown; calls: CallRecord[]; confidential?: Counts }
+  | { status: "failed"; error: string; calls: CallRecord[]; confidential?: Counts };
 
 export interface ApprovalRequest {
   id: string;
@@ -9,6 +16,8 @@ export interface ApprovalRequest {
   steps: PlanStep[];
   flows: Flow[];
   reasons: string[];
+  reveals?: Array<Reveal & { tool: string }>;
+  held?: HeldResult;
   status: "pending" | "approved" | "denied" | "used" | "expired";
   expiresAt: number;
 }
@@ -26,7 +35,7 @@ export function createApprovalStore(ttlMs: number, now: () => number = Date.now)
   };
 
   return {
-    request(fields: Pick<ApprovalRequest, "agent" | "code" | "plan" | "steps" | "flows" | "reasons">): ApprovalRequest {
+    request(fields: Pick<ApprovalRequest, "agent" | "code" | "plan" | "steps" | "flows" | "reasons" | "reveals" | "held">): ApprovalRequest {
       const request: ApprovalRequest = {
         ...fields,
         id: `ap_${randomBytes(9).toString("base64url")}`,

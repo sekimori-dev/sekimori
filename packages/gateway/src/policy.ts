@@ -20,6 +20,13 @@ export interface FlowRequest {
   args: unknown;
 }
 
+export interface RevealRequest {
+  agent: string;
+  tool: string;
+  class: string;
+  source?: string;
+}
+
 export interface Decision {
   allowed: boolean;
   approvalRequired: boolean;
@@ -30,6 +37,7 @@ export interface Decision {
 export interface Policy {
   authorizeCall(request: CallRequest): Decision;
   authorizeFlow(request: FlowRequest): Decision;
+  authorizeReveal(request: RevealRequest): Decision;
 }
 
 // Agent-written arguments must not smuggle Cedar escapes (`__entity`, `__extn`) or values Cedar rejects.
@@ -69,7 +77,7 @@ export function createPolicy(policyText: string): Policy {
   }
   const annotations = annotationsById(policyText);
 
-  const decide = (agent: string, action: "call" | "flow", resource: string, context: Record<string, CedarValueJson>): Decision => {
+  const decide = (agent: string, action: "call" | "flow" | "reveal", resource: string, context: Record<string, CedarValueJson>): Decision => {
     const answer = isAuthorized({
       principal: { type: "Agent", id: agent },
       action: { type: "Action", id: action },
@@ -95,5 +103,6 @@ export function createPolicy(policyText: string): Policy {
       decide(agent, "call", `${upstream}.${tool}`, { upstream, tool, args: toCedar(args) ?? {} }),
     authorizeFlow: ({ agent, source, sink, args }) =>
       decide(agent, "flow", sink, { source, sink, args: toCedar(args) ?? {} }),
+    authorizeReveal: ({ agent, tool, class: name, source }) => decide(agent, "reveal", tool, { class: name, source: source ?? "" }),
   };
 }

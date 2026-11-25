@@ -12,6 +12,7 @@ import { createActivityLog } from "../src/activity.ts";
 import { createApprovalStore } from "../src/approvals.ts";
 import { createCredentialStore } from "../src/credentials.ts";
 import { approvalPorts, startDashboard } from "../src/dashboard.ts";
+import { createConfidential, resolveClasses } from "../src/confidential.ts";
 import { createGateway } from "../src/gateway.ts";
 import { createPolicy } from "../src/policy.ts";
 import { createRemotes } from "../src/upstream.ts";
@@ -150,6 +151,7 @@ async function setup() {
     remotes,
     classification: { tracker: classification },
     policy: createPolicy(`permit(principal == Agent::"test-agent", action == Action::"call", resource);`),
+    confidential: createConfidential(resolveClasses()),
     approvals,
     notifyApprover: (id) => id,
     audit: () => {},

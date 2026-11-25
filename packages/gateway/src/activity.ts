@@ -1,6 +1,7 @@
 import { watch, type FSWatcher } from "node:fs";
 import { appendFile, mkdir, open, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import type { Counts } from "./confidential.ts";
 import type { PlanStep } from "./plan.ts";
 
 // The shared, local activity log behind the dashboard; see docs/superpowers/specs/2026-11-25-dashboard-design.md section 6.
@@ -36,6 +37,7 @@ export type RequestFields = {
   upstreams?: string[];
   calls?: number;
   error?: string;
+  confidential?: Counts;
 };
 
 export type ActivityEntry =
@@ -164,6 +166,7 @@ export interface RequestRow {
   error?: string;
   decision?: { decision: "approved" | "denied" | "expired"; at: string; sessionEnded?: boolean };
   ran: boolean;
+  confidential?: Counts;
 }
 
 export const isWaiting = (row: RequestRow) => row.state === "waiting_approval" || row.state === "waiting_connect";
@@ -242,6 +245,7 @@ export function foldRequests(records: ActivityRecord[], isAlive: (session: Sessi
     if (record.upstreams) row.upstreams = record.upstreams;
     if (record.calls !== undefined) row.calls = record.calls;
     row.error = record.error;
+    if (record.confidential) row.confidential = record.confidential;
     if (record.status === "completed" || record.status === "failed") row.ran = true;
   }
 

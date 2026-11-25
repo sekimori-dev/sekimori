@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createActivityLog, foldRequests, type Session } from "../src/activity.ts";
 import { createApprovalStore } from "../src/approvals.ts";
 import { startDashboard } from "../src/dashboard.ts";
+import { createConfidential, resolveClasses } from "../src/confidential.ts";
 import { createGateway } from "../src/gateway.ts";
 import { createPolicy } from "../src/policy.ts";
 
@@ -118,6 +119,7 @@ describe("dashboard", () => {
       remotes: { names: () => [], list: () => [], requestConnect: () => "", waitFor: async () => {} },
       classification: { fs: { trusted: [], untrusted: [], sinks: ["write_file"] } },
       policy: createPolicy(`permit(principal, action, resource);`),
+      confidential: createConfidential(resolveClasses()),
       approvals,
       notifyApprover: dashboard.announce,
       audit: () => {},

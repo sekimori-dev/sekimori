@@ -7,6 +7,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { foldRequests, isWaiting, type ActivityEntry, type ActivityLog, type ActivityRecord, type RequestRow, type RowState, type Session } from "./activity.ts";
 import type { ApprovalRequest, ApprovalStore } from "./approvals.ts";
+import type { Counts } from "./confidential.ts";
 import type { Remotes, RemoteStatus } from "./upstream.ts";
 
 const escape = (value: string) =>
@@ -312,15 +313,24 @@ function fine(request: ApprovalRequest, note: string): string {
     <code title="${escape(request.plan.hash)}">${escape(request.plan.hash.slice(0, 23))}…</code></p>`;
 }
 
+// Counts only: the dashboard never shows a confidential value.
+function keptLine(counts?: Counts): string {
+  if (!counts) return "";
+  const kept = Object.entries(counts).flatMap(([name, c]) => (c.withheld + c.pseudonymised ? [`${c.withheld + c.pseudonymised} ${name}`] : []));
+  const passed = Object.entries(counts).flatMap(([name, c]) => (c.revealed ? [`${c.revealed} ${name}`] : []));
+  return [kept.length ? `kept back: ${kept.join(" · ")}` : "", passed.length ? `passed on: ${passed.join(" · ")}` : ""].filter(Boolean).join(" · ");
+}
+
 function requestPage(request: ApprovalRequest, chrome: Chrome): string {
   const expired = request.status === "expired" || (request.status === "pending" && request.expiresAt <= Date.now());
   const sealed = request.status === "approved" || request.status === "used";
   const pending = request.status === "pending" && !expired;
   const state: DiagramState = sealed ? "sealed" : pending ? "pending" : "stopped";
 
+  const held = request.held;
   const decision = pending
-    ? `<h1>Seal this program?</h1>
-       <p class="expiry">Expires in <strong>${minutesLeft(request)} min</strong>. Approving runs exactly this code once.</p>
+    ? `<h1>${held ? "Release this result?" : "Seal this program?"}</h1>
+       <p class="expiry">Expires in <strong>${minutesLeft(request)} min</strong>. ${held ? "Approving hands this result to the agent; the program does not run again." : "Approving runs exactly this code once."}</p>
        ${reasons(request)}${actions(request)}${fine(request, "If the agent changes the code, it needs a new seal.")}`
     : sealed
       ? `<div class="outcome"><img src="/assets/seal.svg" alt="Sealed"><h1>Sealed.</h1>
@@ -346,6 +356,10 @@ function requestPage(request: ApprovalRequest, chrome: Chrome): string {
         <section class="panel"><h2>Plan</h2>${diagram(request, state, 760, "wide")}${diagram(request, state, 360, "narrow")}
           <table class="steps"><tbody>${steps}</tbody></table>
           ${request.plan.open ? '<p class="caption">The program also uses tools in ways Sekimori cannot read before running.</p>' : ""}</section>
+        ${held ? `<section class="panel"><h2>Result the agent would receive</h2><p class="caption">${escape(keptLine(held.confidential) || "Nothing was kept back.")} The model sees exactly this, placeholders included.</p><pre class="code">${escape(held.status === "completed" ? JSON.stringify(held.value, null, 2) ?? "undefined" : held.error)
+          .split("\n")
+          .map((line) => `<span>${line || " "}</span>`)
+          .join("")}</pre></section>` : ""}
         <section class="panel"><h2>Program</h2><pre class="code">${codeLines(request)}</pre></section>
         ${pending ? `<section class="actions-late" aria-label="Decision after review">${actions(request)}${fine(request, "If the agent changes the code, it needs a new seal.")}</section>` : ""}
       </div>
@@ -397,7 +411,7 @@ function waitingAction(row: RequestRow, viewer: Viewer): string {
 }
 
 function requestRow(row: RequestRow, viewer: Viewer): string {
-  const meta = [`${escape(row.session.agent)} :${row.session.port}`, row.calls ? `${row.calls} call${row.calls === 1 ? "" : "s"}` : "", row.error ? escape(row.error) : ""];
+  const meta = [`${escape(row.session.agent)} :${row.session.port}`, row.calls ? `${row.calls} call${row.calls === 1 ? "" : "s"}` : "", row.error ? escape(row.error) : "", escape(keptLine(row.confidential))];
   if (isWaiting(row)) {
     const why = row.state === "waiting_connect" ? `Needs ${escape(row.upstreams.join(", ") || "a connection")}` : escape(row.reasons[0] ?? "Needs your approval");
     const left = row.expiresAt ? ` · expires in ${Math.max(0, Math.ceil((row.expiresAt - Date.now()) / 60_000))} min` : "";
@@ -473,26 +487,29 @@ function connectionsPage(local: LocalUpstream[], remotes: RemoteStatus[], chrome
 }
 
 function historyPage(rows: RequestRow[], filter: string | null, chrome: Chrome): string {
-  const decided = rows.filter((r) => r.decision && (!filter || r.decision.decision === filter));
+  const at = (row: RequestRow) => row.decision?.at ?? row.updatedAt;
+  const decided = filter === "kept" ? rows.filter((r) => keptLine(r.confidential)) : rows.filter((r) => r.decision && (!filter || r.decision.decision === filter));
   const days = new Map<string, RequestRow[]>();
-  for (const row of decided.sort((a, b) => (a.decision!.at < b.decision!.at ? 1 : -1))) {
-    const day = new Date(row.decision!.at).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+  for (const row of decided.sort((a, b) => (at(a) < at(b) ? 1 : -1))) {
+    const day = new Date(at(row)).toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
     days.set(day, [...(days.get(day) ?? []), row]);
   }
   const outcome = (row: RequestRow) =>
-    row.decision!.decision === "approved" ? (row.ran ? `Approved · ${row.state === "failed" ? "failed when it ran" : "ran"}` : "Approved · never ran") : row.decision!.sessionEnded ? "Expired · session ended" : row.decision!.decision === "denied" ? "Denied" : "Expired";
-  const filters = [["", "All"], ["approved", "Approved"], ["denied", "Denied"], ["expired", "Expired"]]
+    !row.decision
+      ? STATE_LABEL[row.state]
+      : row.decision.decision === "approved" ? (row.ran ? `Approved · ${row.state === "failed" ? "failed when it ran" : "ran"}` : "Approved · never ran") : row.decision.sessionEnded ? "Expired · session ended" : row.decision.decision === "denied" ? "Denied" : "Expired";
+  const filters = [["", "All"], ["approved", "Approved"], ["denied", "Denied"], ["expired", "Expired"], ["kept", "Kept back"]]
     .map(([value, label]) => `<a href="/history${value ? `?decision=${value}` : ""}"${(filter ?? "") === value ? ' aria-current="page"' : ""}>${label}</a>`)
     .join("");
   return page(
     "History",
     `<main class="index"><h1>Decisions</h1><nav class="filters" aria-label="Filter by decision">${filters}</nav>
-      ${days.size === 0 ? '<p class="empty">No decisions in the last 30 days.</p>' : ""}
+      ${days.size === 0 ? `<p class="empty">${filter === "kept" ? "Nothing was kept back from the model in the last 30 days." : "No decisions in the last 30 days."}</p>` : ""}
       ${[...days]
         .map(
           ([day, list]) => `<section class="day"><h2>${day}</h2><ul class="feed">${list
             .map(
-              (r) => `<li><span class="t">${clock(r.decision!.at)}</span><span class="p">${planLine(r)}<span class="meta">${escape(r.session.agent)} :${r.session.port}${r.reasons[0] ? ` · ${escape(r.reasons[0])}` : ""}</span></span><span class="s${r.decision!.decision === "denied" ? " bad" : ""}">${outcome(r)}</span></li>`,
+              (r) => `<li><span class="t">${clock(at(r))}</span><span class="p">${planLine(r)}<span class="meta">${[`${escape(r.session.agent)} :${r.session.port}`, r.reasons[0] ? escape(r.reasons[0]) : "", escape(keptLine(r.confidential))].filter(Boolean).join(" · ")}</span></span><span class="s${r.decision?.decision === "denied" ? " bad" : ""}">${outcome(r)}</span></li>`,
             )
             .join("")}</ul></section>`,
         )
