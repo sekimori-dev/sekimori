@@ -169,13 +169,30 @@ export interface RequestRow {
 export const isWaiting = (row: RequestRow) => row.state === "waiting_approval" || row.state === "waiting_connect";
 
 const sessionKey = (session: Session) => `${session.port}-${session.pid}`;
+const APPROVAL_ID = /^ap_[\w-]+$/;
+
+// Any process running as the user can write the log, so fields that reach HTML attributes or arithmetic are normalised here.
+function normalise(record: ActivityRecord): ActivityRecord {
+  const session = { port: Number(record.session.port) || 0, pid: Number(record.session.pid) || 0, agent: String(record.session.agent), user: String(record.session.user) };
+  if (record.kind === "decision") return { ...record, session, approvalId: String(record.approvalId) };
+  if (record.kind !== "request") return { ...record, session };
+  return {
+    ...record,
+    session,
+    executionId: String(record.executionId).replace(/[^\w-]/g, "_"),
+    approvalId: record.approvalId && APPROVAL_ID.test(record.approvalId) ? record.approvalId : undefined,
+    expiresAt: record.expiresAt === undefined ? undefined : Number(record.expiresAt) || undefined,
+    calls: record.calls === undefined ? undefined : Number(record.calls) || 0,
+  };
+}
 
 // Folds records into one row per request: a resubmit joins the row of its approval, or of its connect wait.
 export function foldRequests(records: ActivityRecord[], isAlive: (session: Session) => boolean, now = Date.now()): RequestRow[] {
   const rows = new Map<string, RequestRow & { status: RequestStatus }>();
   const alias = new Map<string, string>();
 
-  for (const record of records) {
+  for (const raw of records) {
+    const record = normalise(raw);
     const s = sessionKey(record.session);
     if (record.kind === "decision") {
       const row = rows.get(alias.get(`${s}:ap:${record.approvalId}`) ?? "");

@@ -118,7 +118,8 @@ export function createGateway(options: GatewayOptions) {
       const executionId = randomUUID();
       let planned: Pick<RequestFields, "hash" | "steps" | "open"> = {};
       const finish = (result: ExecuteResult): ExecuteResult => {
-        const id = "approvalId" in result ? result.approvalId : approvalId;
+        // The agent supplies approvalId, so only an ID this gateway issued reaches the dashboard.
+        const id = approvals.get(("approvalId" in result ? result.approvalId : approvalId) ?? "")?.id;
         options.record({
           executionId,
           status: result.status,
@@ -148,12 +149,13 @@ export function createGateway(options: GatewayOptions) {
         return finish({ executionId, status: "rejected", error: (error as Error).message });
       }
       planned = { hash: plan.hash, steps: planSteps(plan, classOf), open: plan.open };
+      const issued = approvalId ? approvals.get(approvalId) : undefined;
       options.record({
         executionId,
         status: approvalId || pendingConnects.has(plan.hash) ? "waiting" : "running",
         ...planned,
-        approvalId,
-        expiresAt: approvalId ? approvals.get(approvalId)?.expiresAt : undefined,
+        approvalId: issued?.id,
+        expiresAt: issued?.expiresAt,
       });
 
       const waitingFor = pendingConnects.get(plan.hash);

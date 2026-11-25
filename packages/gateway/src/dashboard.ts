@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -207,7 +207,7 @@ function page(title: string, body: string, chrome?: Chrome): string {
   const count = chrome?.waiting ? `(${chrome.waiting}) ` : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${count}${escape(title)} · Sekimori</title><link rel="icon" href="/assets/seal.svg" type="image/svg+xml"><style>${STYLE}</style></head>
-<body><header class="bar"><a class="mark" href="/">Sekimori <span lang="ja">関守</span></a>${header}</header>${body}${chrome ? LIVE_SCRIPT : ""}</body></html>`;
+<body><header class="bar"><a class="mark" href="/">Sekimori <span lang="ja">関守</span></a>${header}</header>${body}${chrome ? `<script>${LIVE_JS}</script>` : ""}</body></html>`;
 }
 
 const ARROW = `<svg viewBox="0 0 36 10" aria-hidden="true"><path d="M0 5h32M28 1l4 4-4 4"/></svg>`;
@@ -391,8 +391,8 @@ function waitingAction(row: RequestRow, viewer: Viewer): string {
   const own = row.session.port === viewer.port && row.session.pid === process.pid;
   const path = row.state === "waiting_approval" && row.approvalId ? `/a/${row.approvalId}` : "/connections";
   const label = row.state === "waiting_approval" ? "Review" : "Connect";
-  if (own) return `<a class="button" href="${path}">${label}</a>`;
-  if (viewer.foreign.has(row.session.port)) return `<a class="button ghost" href="http://127.0.0.1:${row.session.port}${path}">${label} in :${row.session.port}</a>`;
+  if (own) return `<a class="button" href="${escape(path)}">${label}</a>`;
+  if (viewer.foreign.has(row.session.port)) return `<a class="button ghost" href="http://127.0.0.1:${row.session.port}${escape(path)}">${label} in :${row.session.port}</a>`;
   return `<form method="post" action="/sessions/${row.session.port}/open"><button class="ghost">Open in its session</button></form>`;
 }
 
@@ -401,17 +401,17 @@ function requestRow(row: RequestRow, viewer: Viewer): string {
   if (isWaiting(row)) {
     const why = row.state === "waiting_connect" ? `Needs ${escape(row.upstreams.join(", ") || "a connection")}` : escape(row.reasons[0] ?? "Needs your approval");
     const left = row.expiresAt ? ` · expires in ${Math.max(0, Math.ceil((row.expiresAt - Date.now()) / 60_000))} min` : "";
-    return `<li id="${row.id}" class="wait"><span class="what">${planLine(row)}</span><span class="why">${why} · ${meta[0]}${left}</span><span class="acts">${waitingAction(row, viewer)}</span></li>`;
+    return `<li id="${escape(row.id)}" class="wait"><span class="what">${planLine(row)}</span><span class="why">${why} · ${meta[0]}${left}</span><span class="acts">${waitingAction(row, viewer)}</span></li>`;
   }
   const label = row.state === "expired" && row.decision?.sessionEnded ? "Expired · session ended" : STATE_LABEL[row.state];
   const tone = row.state === "denied" || row.state === "failed" || row.state === "rejected" ? " bad" : "";
-  return `<li id="${row.id}"><span class="t">${clock(row.startedAt)}</span><span class="p">${planLine(row)}<span class="meta">${meta.filter(Boolean).join(" · ")}</span></span><span class="s${tone}">${label}</span></li>`;
+  return `<li id="${escape(row.id)}"><span class="t">${clock(row.startedAt)}</span><span class="p">${planLine(row)}<span class="meta">${meta.filter(Boolean).join(" · ")}</span></span><span class="s${tone}">${label}</span></li>`;
 }
 
 type LocalUpstream = { name: string; tools: unknown[] };
 
 function connectionItem(item: { name: string; caption: string; state: string; action?: string; failed?: boolean }, prefix: string): string {
-  return `<li id="${prefix}-${item.name}"><span class="name">${escape(item.name)}</span><span class="caption${item.failed ? " failed" : ""}">${item.caption}</span>${item.action ?? `<span class="state">${item.state}</span>`}</li>`;
+  return `<li id="${prefix}-${escape(item.name)}"><span class="name">${escape(item.name)}</span><span class="caption${item.failed ? " failed" : ""}">${item.caption}</span>${item.action ?? `<span class="state">${item.state}</span>`}</li>`;
 }
 
 function connectionItems(local: LocalUpstream[], remotes: RemoteStatus[], withActions: boolean) {
@@ -502,10 +502,11 @@ function historyPage(rows: RequestRow[], filter: string | null, chrome: Chrome):
 }
 
 // The callback request carried no cookie; navigating from this same-site page sends it again.
+const CALLBACK_JS = `location.replace("/connections")`;
 const CALLBACK_DONE = page(
   "Connected",
   `<main class="index"><h1>Connected.</h1><p class="empty">Taking you back to your connections. <a href="/connections">Continue</a></p></main>
-   <script>location.replace("/connections")</script>`,
+   <script>${CALLBACK_JS}</script>`,
 );
 
 const CALLBACK_INVALID = page(
@@ -569,7 +570,7 @@ async function liveSessions(sessionDir: string, user: string): Promise<number> {
   return listed.filter((g) => g && g.user === user && alive(g.pid)).length;
 }
 
-const LIVE_SCRIPT = `<script>
+const LIVE_JS = `
 (() => {
   const live = document.getElementById("live");
   const base = document.title.replace(/^\\(\\d+\\) /, "");
@@ -590,7 +591,7 @@ const LIVE_SCRIPT = `<script>
   };
   events.onerror = () => { live.textContent = "Reconnecting…"; };
 })();
-</script>`;
+`;
 
 // See docs/superpowers/specs/2026-11-25-dashboard-design.md; the approver credential rules are in the slice 2 spec, section 6.
 export async function startDashboard(
@@ -610,6 +611,9 @@ export async function startDashboard(
 ) {
   let origin = `http://127.0.0.1:${options.port}`;
   let port = options.port;
+  // Only the dashboard's own two scripts may run, so markup that slips into a row cannot act as the approver.
+  const scriptHash = (js: string) => `'sha256-${createHash("sha256").update(js).digest("base64")}'`;
+  const CSP = `default-src 'none'; script-src ${scriptHash(LIVE_JS)} ${scriptHash(CALLBACK_JS)}; style-src 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`;
   const token = randomBytes(18).toString("base64url");
   const valid = (candidate: string | undefined) =>
     candidate !== undefined && candidate.length === token.length && timingSafeEqual(Buffer.from(candidate), Buffer.from(token));
@@ -669,7 +673,7 @@ export async function startDashboard(
   async function handle(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url ?? "/", origin);
     const send = (status: number, html: string) => {
-      res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": CSP });
       res.end(html);
     };
     const redirect = (location: string) => {

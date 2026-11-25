@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createActivityLog, foldRequests, type Session } from "../src/activity.ts";
 import { createApprovalStore } from "../src/approvals.ts";
 import { startDashboard } from "../src/dashboard.ts";
+import { createGateway } from "../src/gateway.ts";
+import { createPolicy } from "../src/policy.ts";
 
 const cleanups: Array<() => unknown> = [];
 afterEach(async () => {
@@ -23,7 +25,8 @@ const step = { tool: "fs.write_file", args: ['path: "notes.md"'], runtimeArgs: f
 
 async function startOne(dir: string, signal: (pid: number) => void = () => {}) {
   const activity = createActivityLog(dir, "tester");
-  const dashboard = await startDashboard(createApprovalStore(60_000), {
+  const approvals = createApprovalStore(60_000);
+  const dashboard = await startDashboard(approvals, {
     port: 48_000 + Math.floor(Math.random() * 100) * 10,
     openBrowser: false,
     agent: "claude-code",
@@ -39,7 +42,7 @@ async function startOne(dir: string, signal: (pid: number) => void = () => {}) {
   const origin = `http://127.0.0.1:${dashboard.port}`;
   const cookie = (await fetch(dashboard.indexUrl, { redirect: "manual" })).headers.get("set-cookie")!.split(";")[0]!;
   await writeFile(join(dir, `approver-${dashboard.port}.json`), JSON.stringify({ port: dashboard.port, pid: process.pid, user: "tester" }));
-  return { dashboard, activity, origin, cookie };
+  return { dashboard, activity, approvals, origin, cookie };
 }
 
 describe("dashboard", () => {
@@ -104,5 +107,37 @@ describe("dashboard", () => {
     await writeFile(join(dir, `approver-${b.dashboard.port}.json`), JSON.stringify({ port: b.dashboard.port, pid: process.ppid, user: "tester" }));
     expect((await open(b.dashboard.port)).status).toBe(404);
     expect(signalled).toEqual([process.pid]);
+  });
+
+  it("never renders markup from an agent-supplied approval ID or a forged log line, and pins its scripts", async () => {
+    const dir = await tempDir();
+    const { dashboard, approvals, origin, cookie } = await startOne(dir);
+    const gateway = createGateway({
+      agent: "claude-code",
+      upstreams: [{ name: "fs", tools: [{ name: "write_file", inputSchema: { type: "object" } }], call: async () => "ok" }],
+      remotes: { names: () => [], list: () => [], requestConnect: () => "", waitFor: async () => {} },
+      classification: { fs: { trusted: [], untrusted: [], sinks: ["write_file"] } },
+      policy: createPolicy(`permit(principal, action, resource);`),
+      approvals,
+      notifyApprover: dashboard.announce,
+      audit: () => {},
+      record: (request) => dashboard.append({ kind: "request", ...request }),
+      limits: { timeoutMs: 2_000, memoryBytes: 32 * 1024 * 1024 },
+      approvalWaitMs: 100,
+    });
+    const injected = `ap_x"><img src=x onerror=alert(1)>`;
+
+    await gateway.execute(`await fs.write_file({ path: "notes.md" });`, injected);
+    await appendFile(
+      join(dir, "activity", "tester", `${new Date().toISOString().slice(0, 10)}.jsonl`),
+      `${JSON.stringify({ v: 1, at: new Date().toISOString(), session: { port: `1"><img src=y onerror=alert(2)>`, pid: process.pid, agent: "x", user: "tester" }, kind: "request", executionId: `e"><b>`, status: "approval_required", approvalId: injected })}\n`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    const home = await fetch(`${origin}/`, { headers: { cookie } });
+    const html = await home.text();
+
+    expect(html).toContain("fs.write_file");
+    expect(html).not.toMatch(/<img src=[xy]|<b>/);
+    expect(home.headers.get("content-security-policy")).toMatch(/script-src 'sha256-[^']+' 'sha256-[^']+';/);
   });
 });
