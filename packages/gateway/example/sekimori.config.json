@@ -11,6 +11,15 @@
         "untrusted": ["read_*", "search_files"],
         "sinks": ["write_*", "edit_*", "move_*", "create_*"]
       }
+    },
+    {
+      "name": "jira",
+      "url": "https://mcp.atlassian.com/v2/mcp",
+      "classify": {
+        "trusted": ["atlassianUserInfo", "getAccessibleAtlassianResources", "getVisibleJiraProjects"],
+        "untrusted": ["get*", "search*", "fetch", "lookup*"],
+        "sinks": ["create*", "edit*", "update*", "add*", "transition*"]
+      }
     }
   ],
   "limits": { "timeoutMs": 30000 },

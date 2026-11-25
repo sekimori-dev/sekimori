@@ -2,7 +2,11 @@
 permit (principal == Agent::"claude-code", action == Action::"call", resource)
 when { context.upstream == "fs" };
 
-// ...but never edit, move or create files or directories.
+// ...and Jira, through the developer's own Atlassian account.
+permit (principal == Agent::"claude-code", action == Action::"call", resource)
+when { context.upstream == "jira" };
+
+// ...but never edit, move or create anything.
 forbid (principal, action == Action::"call", resource)
 when { context.tool like "edit*" || context.tool like "move*" || context.tool like "create*" };
 
