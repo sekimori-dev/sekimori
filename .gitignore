@@ -3,3 +3,9 @@ dist/
 .astro/
 .impeccable/review/
 .impeccable/questions/
+# Internal docs live in the private sekimori-internal repo and are linked in locally.
+/CLAUDE.md
+/PRODUCT.md
+/DESIGN.md
+/docs/
+/.impeccable/
