@@ -139,8 +139,7 @@ export function createGateway(options: GatewayOptions) {
         pendingConnects.delete(plan.hash);
         return finish({ executionId, status: "connected", upstreams: waitingFor, declarations: renderDeclarations(ready.map((r) => r.upstream!)) });
       }
-      const used = new Set(plan.calls.map((c) => splitTool(c.tool).upstream));
-      const missing = remotes.list().filter((r) => used.has(r.name) && r.state !== "connected");
+      const missing = remotes.list().filter((r) => plan.namespaces.includes(r.name) && r.state !== "connected");
       const unavailable = missing.find((r) => r.state === "unavailable");
       if (unavailable) return finish({ executionId, status: "rejected", error: `Upstream ${unavailable.name} is unavailable: ${unavailable.reason}` });
       if (missing.length > 0) {

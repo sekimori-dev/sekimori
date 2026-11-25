@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApprovalStore } from "../src/approvals.ts";
-import { createGateway, type AuditEvent } from "../src/gateway.ts";
+import { createGateway, type AuditEvent, type GatewayOptions } from "../src/gateway.ts";
 import { createPolicy } from "../src/policy.ts";
 import type { Upstream } from "../src/upstream.ts";
 
@@ -21,15 +21,17 @@ function fakeMail() {
   return { upstream, received };
 }
 
+const noRemotes: GatewayOptions["remotes"] = { names: () => [], list: () => [], requestConnect: () => "", waitFor: async () => {} };
+
 const permitAll = `permit(principal == Agent::"test-agent", action == Action::"call", resource);`;
 
-function gatewayWith(upstream: Upstream, policies: string, timeoutMs = 2_000) {
+function gatewayWith(upstream: Upstream, policies: string, timeoutMs = 2_000, remotes: GatewayOptions["remotes"] = noRemotes) {
   const events: AuditEvent[] = [];
   const approvals = createApprovalStore(60_000);
   const gateway = createGateway({
     agent: "test-agent",
     upstreams: [upstream],
-    remotes: { names: () => [], list: () => [], requestConnect: () => "", waitFor: async () => {} },
+    remotes,
     classification: { mail: { trusted: [], untrusted: ["search"], sinks: ["send"] } },
     policy: createPolicy(policies),
     approvals,
@@ -78,6 +80,16 @@ describe("sandbox and policy", () => {
     expect(await gateway.execute(`return 1 + 1;`)).toMatchObject({ status: "completed", value: 2 });
     expect(await gateway.execute(`throw new Error("boom");`)).toMatchObject({ status: "failed", error: "Error: boom" });
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("asks to connect a remote upstream even when the program reaches it through a cast", async () => {
+    const { upstream } = fakeMail();
+    const notion = { names: () => ["notion"], list: () => [{ name: "notion", host: "mcp.notion.com", state: "needs_connect" as const }] };
+    const { gateway } = gatewayWith(upstream, permitAll, 2_000, { ...noRemotes, ...notion, requestConnect: () => "http://approvals.test/connect" });
+
+    const result = await gateway.execute(`return await (notion as any)["notion-search"]({ query: "Jour Fixe" });`);
+
+    expect(result).toMatchObject({ status: "connect_required", upstreams: ["notion"] });
   });
 
   it("interrupts a runaway program at the time limit", async () => {

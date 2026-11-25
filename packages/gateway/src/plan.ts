@@ -20,6 +20,8 @@ export interface Plan {
   hash: string;
   calls: PlannedCall[];
   open: boolean;
+  // Every upstream the code mentions, including through casts or aliases that keep a call out of `calls`.
+  namespaces: string[];
 }
 
 const BANNED_IDENTIFIERS = new Set(["eval", "Function", "globalThis"]);
@@ -91,6 +93,7 @@ export function extractPlan(code: string, namespaces: Set<string>): Plan {
   const file = ts.createSourceFile("program.ts", code, ts.ScriptTarget.ES2022, true);
   const calls: PlannedCall[] = [];
   const consumed = new Set<ts.Node>();
+  const referenced = new Set<string>();
   let open = false;
 
   const visit = (node: ts.Node, repeated: boolean): void => {
@@ -115,6 +118,7 @@ export function extractPlan(code: string, namespaces: Set<string>): Plan {
 
     if (ts.isIdentifier(node) && !isPropertyName(node)) {
       if (BANNED_IDENTIFIERS.has(node.text)) throw new Error(`\`${node.text}\` is not allowed in Sekimori programs`);
+      if (namespaces.has(node.text)) referenced.add(node.text);
       if (namespaces.has(node.text) && !consumed.has(node)) open = true;
     }
 
@@ -123,7 +127,7 @@ export function extractPlan(code: string, namespaces: Set<string>): Plan {
   };
 
   visit(file, false);
-  return { hash: `sha256:${createHash("sha256").update(code).digest("hex")}`, calls, open };
+  return { hash: `sha256:${createHash("sha256").update(code).digest("hex")}`, calls, open, namespaces: [...referenced] };
 }
 
 export interface PlanStep {
