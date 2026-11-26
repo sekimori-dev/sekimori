@@ -169,14 +169,25 @@ function readings(token: string): number[] {
 // Forwarding compares values with spacing, separators and case removed, since programs reformat what they pass on.
 const normal = (text: string) => text.toLowerCase().replace(/[\s.,'_/-]/g, "");
 
+// The exact digits of an integral JSON number literal, whatever its notation ("4.2e15", "4200000000000000.0").
+function integerDigits(source: string): string | undefined {
+  const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(source);
+  if (!m) return undefined;
+  const digits = (m[2]! + (m[3] ?? "")).replace(/^0+(?=\d)/, "");
+  const shift = Number(m[4] ?? 0) - (m[3]?.length ?? 0);
+  if (shift >= 0) return m[1] + digits + "0".repeat(shift);
+  return /^0+$/.test(digits.slice(shift)) ? m[1] + digits.slice(0, shift) : undefined;
+}
+
 function parseJson(text: string): unknown {
   const trimmed = text.trim();
   if (!/^[[{]/.test(trimmed)) return undefined;
   try {
-    // Unsafe integers lose digits as numbers; their exact source digits are kept as strings for the pattern checks.
-    return JSON.parse(trimmed, (_key, value, context?: { source?: string }) =>
-      typeof value === "number" && !Number.isSafeInteger(value) && /^-?\d+$/.test(context?.source ?? "") ? context!.source : value,
-    );
+    // Unsafe integers lose digits as numbers; their exact digits are kept as strings for the pattern checks.
+    return JSON.parse(trimmed, (_key, value, context?: { source?: string }) => {
+      if (typeof value !== "number" || Number.isSafeInteger(value) || !Number.isInteger(value)) return value;
+      return integerDigits(context?.source ?? "") ?? value;
+    });
   } catch {
     return undefined;
   }
