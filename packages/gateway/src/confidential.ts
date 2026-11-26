@@ -173,9 +173,9 @@ function parseJson(text: string): unknown {
   const trimmed = text.trim();
   if (!/^[[{]/.test(trimmed)) return undefined;
   try {
-    // Integers past 15 digits lose precision as numbers; their exact digits are kept as strings for the checks.
+    // Unsafe integers lose digits as numbers; their exact source digits are kept as strings for the pattern checks.
     return JSON.parse(trimmed, (_key, value, context?: { source?: string }) =>
-      typeof value === "number" && /\d{15,}/.test(context?.source ?? "") ? context!.source : value,
+      typeof value === "number" && !Number.isSafeInteger(value) && /^-?\d+$/.test(context?.source ?? "") ? context!.source : value,
     );
   } catch {
     return undefined;
@@ -201,6 +201,8 @@ export function createConfidential(classes: DataClass[]) {
   function remember(value: unknown, origin: Origin): boolean {
     if (typeof value === "string" && value.length >= 4) {
       if (!knownStrings.has(value)) knownStrings.set(value, origin);
+      // The sandbox sees digit strings from JSON as (possibly rounded) numbers, so remember that form too.
+      if (/^-?\d+$/.test(value) && !knownNumbers.has(Number(value))) knownNumbers.set(Number(value), origin);
       return true;
     }
     if (typeof value === "number" && digitsOf(String(value)).length >= 4) {

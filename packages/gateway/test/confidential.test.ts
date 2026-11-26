@@ -28,6 +28,7 @@ function fakes() {
     upstreams: [
       upstream("payroll", { list_employees: () => EMPLOYEES, update_employee: (args) => `Saved IBAN ${args.iban}` }),
       upstream("archive", { read: () => "Archived: Jon Example earned 61000 last year" }),
+      upstream("ledger", { accounts: () => '[{"account_number": 123456789012345}, {"account_number": 9007199254740993}]' }),
       upstream("slack", { post: () => "posted" }),
       upstream("files", { read_file: () => "Quarterly notes, nothing special" }),
       upstream("erp", { get_project: () => JSON.stringify({ code: "ZEUS", note: "Ref PRJ-123456", budget: 90000, salary: 50000 }) }),
@@ -47,6 +48,7 @@ function gatewayWith(policies = permitCalls, classes: Record<string, ClassConfig
     classification: {
       payroll: { trusted: ["*"], untrusted: [], sinks: ["update_*"] },
       archive: { trusted: ["*"], untrusted: [], sinks: [] },
+      ledger: { trusted: ["*"], untrusted: [], sinks: [] },
       slack: { trusted: [], untrusted: [], sinks: ["post"] },
       files: { trusted: [], untrusted: ["read_file"], sinks: [] },
       erp: { trusted: ["*"], untrusted: [], sinks: [] },
@@ -95,6 +97,8 @@ describe("confidential data", () => {
     expect(renamed).toEqual([{ s: "⟦withheld:payroll⟧" }, { s: "⟦withheld:payroll⟧" }]);
     expect(sentence).toMatch(/^Transfer to ⟦bank·[0-9a-f]{6}⟧$/);
     expect(average).toEqual({ average_salary: 56500 });
+    const accounts = await value(gateway, `const a = JSON.parse(await ledger.accounts({})); return { x: a[0].account_number, y: a[1].account_number };`);
+    expect(JSON.stringify(accounts)).not.toMatch(/123456789012345|900719925474099/);
     const numericCard = await value(gateway, `return '{"card": 4111111111111111, "tax_ref": 12345678903}';`);
     expect(JSON.parse(numericCard as string)).toEqual({
       card: expect.stringMatching(/^⟦bank·[0-9a-f]{6}⟧$/),
