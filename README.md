@@ -2,16 +2,24 @@
 
 The checkpoint between AI agents and the tools they use.
 
-Sekimori is an MCP gateway for code-mode agents such as Claude Code. The agent doesn't call tools one by one: it writes a short TypeScript program against a typed API generated from your MCP servers. Before that program runs, Sekimori:
+Sekimori is an MCP gateway for code-mode agents such as Claude Code. The agent doesn't call tools one by one: it writes a short TypeScript program against a typed API generated from your MCP servers. Sekimori runs that program in a sandbox and keeps two promises.
 
+**What an agent may do.** Before the program runs, Sekimori:
 1. reads it and extracts a plan;
 2. checks every planned call against Cedar policies;
 3. asks a human once for the whole program whenever untrusted data could reach a sensitive action.
 
 Standing grants (a **tegata**, the pass a traveller showed at an Edo-period checkpoint) let routine programs through without asking.
 
+**What the model may read.** Programs may work with confidential data (payroll, bank details, national IDs, health data, credentials) inside the sandbox. Before anything goes back to the model, Sekimori replaces the raw values:
+- computed results, such as an average, go back;
+- payroll and health values are withheld;
+- IBANs and IDs become placeholders that the agent can still pass on to tools that may receive them.
+
+For companies that don't want such data sent to a cloud model's data centre, the dashboard shows for every request what was kept back.
+
 **Status: pre-release.**
-- What works: the standalone gateway, dogfooded by its author with Claude Code.
+- What works: the standalone gateway with both promises, dogfooded by its author with Claude Code against a filesystem server, Notion and an example payroll server.
 - Not published: no npm package, no container image, no stable configuration format.
 - Not built yet: Sekimori Cloud (policy distribution, approvals in the web and Slack, audit history), which is the next milestone.
 
@@ -19,7 +27,8 @@ Site: https://sekimori-dev.github.io
 
 ## Goal
 
-Agents should be able to act on real systems (mail, chat, issue trackers, files) without a human approving every call. And a prompt injection in something the agent read should still be unable to reach a sensitive action unnoticed. "Approve programs, not calls" keeps the human in the loop without approval fatigue.
+- **Acting.** Agents should be able to act on real systems (mail, chat, issue trackers, files) without a human approving every call. A prompt injection in something the agent read should still be unable to reach a sensitive action unnoticed. "Approve programs, not calls" keeps the human in the loop without approval fatigue.
+- **Reading.** Agents should be able to work with data a company won't hand to a cloud model, and the company should be able to check that it wasn't handed over.
 
 ## How it works
 
