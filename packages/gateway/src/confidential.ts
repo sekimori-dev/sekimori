@@ -173,7 +173,10 @@ function parseJson(text: string): unknown {
   const trimmed = text.trim();
   if (!/^[[{]/.test(trimmed)) return undefined;
   try {
-    return JSON.parse(trimmed);
+    // Integers past 15 digits lose precision as numbers; their exact digits are kept as strings for the checks.
+    return JSON.parse(trimmed, (_key, value, context?: { source?: string }) =>
+      typeof value === "number" && /\d{15,}/.test(context?.source ?? "") ? context!.source : value,
+    );
   } catch {
     return undefined;
   }
@@ -262,7 +265,11 @@ export function createConfidential(classes: DataClass[]) {
       const parsed = parseJson(value);
       return parsed === undefined ? scrubText(value, counts) : JSON.stringify(scrub(parsed, counts));
     }
-    if (typeof value === "number") return knownNumbers.has(value) ? token(value, knownNumbers.get(value)!, counts) : value;
+    if (typeof value === "number") {
+      if (knownNumbers.has(value)) return token(value, knownNumbers.get(value)!, counts);
+      const pattern = patternMatches(String(value))[0];
+      return pattern ? token(value, { class: pattern.class }, counts) : value;
+    }
     if (Array.isArray(value)) return value.map((item) => scrub(item, counts));
     if (value && typeof value === "object") {
       const out: Record<string, unknown> = {};
@@ -298,6 +305,8 @@ export function createConfidential(classes: DataClass[]) {
         }
         if (typeof node === "number" || typeof node === "boolean") {
           if (inherited && remember(node, { class: inherited, source })) found++;
+          const pattern = typeof node === "number" ? patternMatches(String(node))[0] : undefined;
+          if (pattern && remember(node, { class: pattern.class, source })) found++;
           return;
         }
         if (Array.isArray(node)) return node.forEach((item) => walk(item, inherited));

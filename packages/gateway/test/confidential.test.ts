@@ -95,6 +95,11 @@ describe("confidential data", () => {
     expect(renamed).toEqual([{ s: "⟦withheld:payroll⟧" }, { s: "⟦withheld:payroll⟧" }]);
     expect(sentence).toMatch(/^Transfer to ⟦bank·[0-9a-f]{6}⟧$/);
     expect(average).toEqual({ average_salary: 56500 });
+    const numericCard = await value(gateway, `return '{"card": 4111111111111111, "tax_ref": 12345678903}';`);
+    expect(JSON.parse(numericCard as string)).toEqual({
+      card: expect.stringMatching(/^⟦bank·[0-9a-f]{6}⟧$/),
+      tax_ref: expect.stringMatching(/^⟦national_id·[0-9a-f]{6}⟧$/),
+    });
   });
 
   it("puts placeholders back only where they may go, and blocks raw values forwarded elsewhere", async () => {
