@@ -257,7 +257,11 @@ export function createConfidential(classes: DataClass[]) {
   }
 
   function scrub(value: unknown, counts: Counts): unknown {
-    if (typeof value === "string") return scrubText(value, counts);
+    if (typeof value === "string") {
+      // JSON passed on as text is checked as structure, so markers stay valid JSON for the model.
+      const parsed = parseJson(value);
+      return parsed === undefined ? scrubText(value, counts) : JSON.stringify(scrub(parsed, counts));
+    }
     if (typeof value === "number") return knownNumbers.has(value) ? token(value, knownNumbers.get(value)!, counts) : value;
     if (Array.isArray(value)) return value.map((item) => scrub(item, counts));
     if (value && typeof value === "object") {

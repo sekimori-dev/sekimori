@@ -88,6 +88,10 @@ describe("confidential data", () => {
       expect(output).not.toMatch(/52000|61000|52,000|1904 3002|3704 0044/);
     }
     expect(raw).toMatch(/⟦withheld:payroll⟧[\s\S]*⟦bank·[0-9a-f]{6}⟧/);
+    expect(JSON.parse(JSON.parse(raw))).toEqual([
+      expect.objectContaining({ salary: "⟦withheld:payroll⟧", iban: expect.stringMatching(/^⟦bank·[0-9a-f]{6}⟧$/) }),
+      expect.objectContaining({ salary: "⟦withheld:payroll⟧" }),
+    ]);
     expect(renamed).toEqual([{ s: "⟦withheld:payroll⟧" }, { s: "⟦withheld:payroll⟧" }]);
     expect(sentence).toMatch(/^Transfer to ⟦bank·[0-9a-f]{6}⟧$/);
     expect(average).toEqual({ average_salary: 56500 });
