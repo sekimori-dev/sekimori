@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApprovalStore } from "../src/approvals.ts";
+import { createConfidential, resolveClasses } from "../src/confidential.ts";
 import { createGateway, type AuditEvent, type GatewayOptions } from "../src/gateway.ts";
 import { createPolicy } from "../src/policy.ts";
 import type { Upstream } from "../src/upstream.ts";
@@ -34,6 +35,7 @@ function gatewayWith(upstream: Upstream, policies: string, timeoutMs = 2_000, re
     remotes,
     classification: { mail: { trusted: [], untrusted: ["search"], sinks: ["send"] } },
     policy: createPolicy(policies),
+    confidential: createConfidential(resolveClasses()),
     approvals,
     notifyApprover: (id) => `http://approvals.test/a/${id}`,
     audit: (event) => events.push(event),

@@ -13,6 +13,12 @@
       }
     },
     {
+      "name": "payroll",
+      "command": "node",
+      "args": ["../packages/gateway/example/payroll-server.ts"],
+      "classify": { "trusted": ["list_*"], "sinks": ["update_*"] }
+    },
+    {
       "name": "notion",
       "url": "https://mcp.notion.com/mcp",
       "classify": {

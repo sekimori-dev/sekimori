@@ -34,6 +34,13 @@ Agents should be able to act on real systems (mail, chat, issue trackers, files)
   - `@approval("required")` on a policy forces a human look.
   - `Action::"flow"` policies are the standing grants.
 - **Approvals.** The gateway serves a local dashboard on `127.0.0.1:4747` and opens it in your browser when a program needs you. An approval is bound to the exact code (by hash), single-use and expires.
+- **Confidential data.** Agents may work with data a cloud model should not read: payroll, bank details, national IDs, health data, credentials. Programs read it inside the sandbox and pass it from tool to tool. What goes back to the model is checked first:
+  - computed results (an average, a count) pass;
+  - raw values are withheld (`⟦withheld:payroll⟧`) or replaced by placeholders (`⟦bank·7f3a2c⟧`). Sekimori puts the real value back when a placeholder is passed to a tool that may receive it;
+  - the check catches raw values even when a program renames them, uses them as keys, writes them into sentences or formats them differently. It also covers error messages and values read back from other tools later.
+  - **Where values may go.** A confidential value may go back to the server it came from. Anything else needs a Cedar `Action::"reveal"` grant or an approval, and that includes raw values a program forwards to another tool.
+  - **The checkpoint.** A program that deliberately encodes a value (for example the digits reversed) gets past rules like these. Such a program normally only appears after the agent read something untrusted. So once a session has read untrusted data, a program that reads confidential data has its result held for your approval before the model sees it.
+  - **The proof.** The dashboard and the activity log show for every request how many values of which class were kept back, never the values.
 - **Remote MCP servers.** The gateway connects to them as you, with OAuth 2.1. Tokens are stored encrypted on your machine, with the key in the macOS Keychain, and are refreshed by the gateway. They never reach the agent.
 - **Dashboard.** Requests from every running session appear live, together with your connections and a 30-day history of decisions.
 
@@ -70,7 +77,8 @@ claude
 
 Approve the `sekimori` MCP server when asked, then give the agent a task. The gateway uses [`packages/gateway/example/sekimori.config.json`](packages/gateway/example/sekimori.config.json) and [`policies.cedar`](packages/gateway/example/policies.cedar) next to it:
 - the filesystem server runs on the `dogfood/` folder;
-- Notion is configured as a remote server; reads run freely, and every change asks first.
+- Notion is configured as a remote server; reads run freely, and every change asks first;
+- an example payroll server with fictional data (`packages/gateway/example/payroll-server.ts`) shows the confidential-data rules at work.
 
 The gateway loads its configuration and policies at startup, so run `/mcp` in Claude Code to reconnect after changing them.
 
@@ -95,6 +103,7 @@ To use Sekimori in your own project, add it to that project's `.mcp.json`:
 | `user` | Whose tokens and activity this gateway uses. Defaults to your OS user name. |
 | `policies` | Path to the Cedar policy file, relative to the config file. |
 | `upstreams[]` | MCP servers. Either `command` and `args` (stdio, started by the gateway), or `url` (remote, connected with OAuth). Each gets a `classify` block with glob patterns for `trusted`, `untrusted` and `sinks`. |
+| `confidential` | `classes`: switch built-in classes (`credentials`, `bank`, `national_id`, `payroll`, `health` on; `contact`, `person` off) with `enabled` and `mode` (`withhold` or `pseudonymise`), or add your own with `fields`, `patterns` (regular expressions) and `sources` (tool globs such as `erp.*`). |
 | `limits` | `timeoutMs` and `memoryBytes` for the sandbox. |
 | `approvals` | `port` (default 4747; the next nine ports are the fallback), `ttlMinutes`, `openBrowser`, `waitSeconds`. |
 
@@ -126,6 +135,9 @@ pnpm -C packages/gateway test
 ## Known limits
 
 - **Same-user agents.** An agent with unrestricted shell access as the same OS user can still read the browser's cookie store or edit the policy file. Real separation needs an approval channel off the agent's machine; that is planned for Sekimori Cloud.
+- **Confidential data is found by rules, not by meaning.** Field names, value patterns with checksums and configured sources find it. A salary mentioned in free text with no pattern around it is not found. Short values and booleans (`sick_leave: true`) are withheld under their field, but not recognised once copied elsewhere. An average over one person equals that person's value, and Sekimori withholds it for that reason.
+- **One person per gateway.** Shared platforms that serve many users from one server (Open WebUI, LibreChat, Onyx) need a gateway per user for now. A shared team gateway is planned.
+- **Upstream logs.** The stderr output of MCP servers the gateway starts is passed through as it is. Sekimori's own records never contain confidential values; the servers' own logs are outside its control.
 - **Coarse data-flow tracking.** It works per program and session; per-value tracking comes later.
 - **Linked account.** The dashboard cannot show which upstream account an OAuth connection belongs to.
 - **Windows.** `pnpm approvals` and "Open in its session" rely on `SIGUSR2` and do not work on Windows yet.

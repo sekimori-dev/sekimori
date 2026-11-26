@@ -28,6 +28,14 @@ const remoteUpstream = z.object({
   classify,
 });
 
+const confidentialClass = z.object({
+  enabled: z.boolean().optional(),
+  mode: z.enum(["withhold", "pseudonymise"]).optional(),
+  fields: z.array(z.string().min(1)).optional(),
+  patterns: z.array(z.string().min(1)).optional(),
+  sources: z.array(z.string().min(1)).optional(),
+});
+
 const configSchema = z.object({
   agent: z.string().min(1),
   // Names a directory under ~/.sekimori/credentials, so it stays a plain path segment.
@@ -37,6 +45,7 @@ const configSchema = z.object({
     .default(() => userInfo().username),
   policies: z.string().min(1),
   upstreams: z.array(z.union([stdioUpstream, remoteUpstream])).min(1),
+  confidential: z.object({ classes: z.record(z.string().regex(/^[a-z][\w-]*$/), confidentialClass).default({}) }).prefault({}),
   limits: z
     .object({
       timeoutMs: z.number().int().positive().default(30_000),

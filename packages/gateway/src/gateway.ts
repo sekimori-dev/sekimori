@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { RequestFields } from "./activity.ts";
 import type { ApprovalStore } from "./approvals.ts";
 import type { Classification, Limits } from "./config.ts";
+import type { Confidential, Counts, Reveal } from "./confidential.ts";
 import { renderDeclarations } from "./declarations.ts";
 import { classify, extractPlan, formatStep, planSteps, type Flow, type Plan, type ToolClass } from "./plan.ts";
 import type { Decision, Policy } from "./policy.ts";
@@ -16,10 +17,10 @@ export interface CallRecord {
 }
 
 export type ExecuteResult = { executionId: string } & (
-  | { status: "completed"; value: unknown; calls: CallRecord[] }
-  | { status: "failed"; error: string; calls: CallRecord[] }
+  | { status: "completed"; value: unknown; calls: CallRecord[]; confidential?: Counts }
+  | { status: "failed"; error: string; calls: CallRecord[]; confidential?: Counts }
   | { status: "rejected"; error: string }
-  | { status: "approval_required"; approvalId: string; approveAt: string; plan: string[]; reasons: string[] }
+  | { status: "approval_required"; approvalId: string; approveAt: string; plan: string[]; reasons: string[]; confidential?: Counts }
   | { status: "approval_pending"; approvalId: string }
   | { status: "connect_required"; upstreams: string[]; connectAt: string }
   | { status: "connect_pending"; upstreams: string[] }
@@ -34,6 +35,8 @@ export type AuditEvent = { executionId: string; agent: string } & (
   | { type: "grant_applied"; tool: string; source: string; reasons: string[] }
   | { type: "blocked"; tool: string; reason: string }
   | { type: "execution"; status: ExecuteResult["status"]; error?: string; calls: number }
+  | { type: "confidential_kept"; counts: Counts }
+  | { type: "confidential_revealed"; tool: string; class: string; placeholder?: string }
 );
 
 export interface GatewayOptions {
@@ -42,6 +45,7 @@ export interface GatewayOptions {
   remotes: Pick<Remotes, "names" | "list" | "requestConnect" | "waitFor">;
   classification: Record<string, Classification>;
   policy: Policy;
+  confidential: Confidential;
   approvals: ApprovalStore;
   notifyApprover: (approvalId: string) => string;
   audit: (event: AuditEvent) => void;
@@ -51,7 +55,7 @@ export interface GatewayOptions {
 }
 
 // Program errors can carry tool output, so only messages the gateway itself wrote go into the activity log.
-const GATEWAY_ERROR = /^(\w+: )?((Denied by policy|Policy requires approval|Call outside the plan|Not covered by a grant or approval): [\w.-]+|Program exceeded the \d+ ms limit)$/;
+const GATEWAY_ERROR = /^(\w+: )?((Denied by policy|Policy requires approval|Call outside the plan|Not covered by a grant or approval): [\w.-]+|Confidential [\w-]+ value may not be sent to [\w.-]+|Program exceeded the \d+ ms limit)$/;
 function loggableError(result: ExecuteResult): string | undefined {
   if (result.status === "rejected") return result.error;
   if (result.status !== "failed") return undefined;
@@ -64,7 +68,7 @@ function splitTool(qualified: string): { upstream: string; tool: string } {
 }
 
 export function createGateway(options: GatewayOptions) {
-  const { agent, upstreams, remotes, policy, approvals, audit, limits } = options;
+  const { agent, upstreams, remotes, policy, confidential, approvals, audit, limits } = options;
   const namespaces = new Set([...upstreams.map((u) => u.name), ...remotes.names()]);
   // Code hash -> remote upstreams that program was told to connect; its resubmit waits for them.
   const pendingConnects = new Map<string, string[]>();
@@ -77,16 +81,33 @@ export function createGateway(options: GatewayOptions) {
     return classify(options.classification[upstream] ?? { trusted: [], untrusted: [], sinks: [] }, tool);
   };
 
+  // A confidential value may go back to the upstream it came from; anything else needs a reveal grant,
+  // and a grant marked @approval("required") still needs the human.
+  const revealDecision = (reveal: Reveal, tool: string): "allow" | "approval" | "deny" => {
+    if (reveal.source !== undefined && splitTool(reveal.source).upstream === splitTool(tool).upstream) return "allow";
+    const decision = policy.authorizeReveal({ agent, tool, class: reveal.class, source: reveal.source });
+    return !decision.allowed ? "deny" : decision.approvalRequired ? "approval" : "allow";
+  };
+
   // Returns why a human must look at this program before it runs; empty means it may run as is.
-  function approvalReasons(plan: Plan): { reasons: string[]; flows: Flow[]; denied?: string } {
+  function approvalReasons(plan: Plan): { reasons: string[]; flows: Flow[]; reveals: Array<Reveal & { tool: string }>; denied?: string } {
     const reasons: string[] = [];
     const flows: Flow[] = [];
+    const reveals: Array<Reveal & { tool: string }> = [];
     for (const call of plan.calls) {
       // With runtime arguments only the static ones are known, so a deny here is not final; Cedar decides again at runtime.
       const decision = policy.authorizeCall({ agent, ...splitTool(call.tool), args: call.args });
-      if (!decision.allowed && !call.runtimeArgs) return { reasons, flows, denied: `Denied by policy: ${call.tool}` };
+      if (!decision.allowed && !call.runtimeArgs) return { reasons, flows, reveals, denied: `Denied by policy: ${call.tool}` };
       if (decision.approvalRequired) reasons.push(`Policy requires approval for ${call.tool}`);
+      for (const reveal of confidential.placeholdersIn(JSON.stringify(call.args))) {
+        if (revealDecision(reveal, call.tool) === "allow") continue;
+        reveals.push({ ...reveal, tool: call.tool });
+        reasons.push(`Confidential ${reveal.class} value would be sent to ${call.tool}`);
+      }
     }
+    // A model that read untrusted data may have been told to encode confidential values; see the confidential data spec, section 7.
+    const confidentialSource = plan.calls.find((c) => confidential.isSource(c.tool));
+    if (sessionUntrusted.size > 0 && confidentialSource) reasons.push(`Reads confidential data from ${confidentialSource.tool} after untrusted input`);
     const planned = plan.calls.map((c) => c.tool).filter((t) => classOf(t).source === "untrusted");
     const sources = [...new Set([...planned, ...sessionUntrusted])];
     for (const sink of plan.calls.filter((c) => classOf(c.tool).sink)) {
@@ -99,7 +120,7 @@ export function createGateway(options: GatewayOptions) {
       }
     }
     if (plan.open) reasons.push("The program uses tools in ways Sekimori cannot read before running");
-    return { reasons: [...new Set(reasons)], flows };
+    return { reasons: [...new Set(reasons)], flows, reveals };
   }
 
   return {
@@ -111,7 +132,7 @@ export function createGateway(options: GatewayOptions) {
             ? [`// Unavailable: ${r.name} (${r.reason}). Programs that use \`${r.name}\` are rejected.`]
             : [`// Not connected yet: ${r.name}. A program that uses \`${r.name}\` asks the user to connect it.`],
       );
-      return [renderDeclarations(connected()), ...notes].filter(Boolean).join("\n\n");
+      return [renderDeclarations(connected()), ...notes, confidential.describe()].filter(Boolean).join("\n\n");
     },
 
     async execute(code: string, approvalId?: string): Promise<ExecuteResult> {
@@ -130,7 +151,9 @@ export function createGateway(options: GatewayOptions) {
           upstreams: "upstreams" in result ? result.upstreams : undefined,
           calls: "calls" in result ? result.calls.length : 0,
           error: loggableError(result),
+          confidential: "confidential" in result ? result.confidential : undefined,
         });
+        if ("confidential" in result && result.confidential) audit({ type: "confidential_kept", executionId, agent, counts: result.confidential });
         audit({
           type: "execution",
           executionId,
@@ -181,11 +204,14 @@ export function createGateway(options: GatewayOptions) {
         return finish({ executionId, status: "connect_required", upstreams: names, connectAt: remotes.requestConnect(names) });
       }
 
-      const { reasons, flows, denied } = approvalReasons(plan);
+      const { reasons, flows, reveals, denied } = approvalReasons(plan);
       audit({ type: "plan", executionId, agent, hash: plan.hash, calls: plan.calls.length, open: plan.open, reasons });
       if (denied) return finish({ executionId, status: "rejected", error: denied });
 
       let approved = false;
+      let approvedReveals = new Set<string>();
+      // Only an approval whose reasons named the confidential checkpoint lets a result skip the hold.
+      let confidentialApproved = false;
       if (approvalId) {
         if (approvals.get(approvalId)?.plan.hash === plan.hash) {
           await approvals.waitForDecision(approvalId, options.approvalWaitMs);
@@ -195,9 +221,13 @@ export function createGateway(options: GatewayOptions) {
         if (!consumed.ok) return finish({ executionId, status: "rejected", error: consumed.error });
         approved = true;
         audit({ type: "approval_used", executionId, agent, approvalId });
+        const { held } = consumed.request;
+        if (held) return finish({ executionId, ...held });
+        approvedReveals = new Set((consumed.request.reveals ?? []).map((r) => `${r.tool} ${r.placeholder}`));
+        confidentialApproved = consumed.request.reasons.some((r) => r.startsWith("Reads confidential data from"));
       } else if (reasons.length > 0) {
         const steps = planned.steps!;
-        const request = approvals.request({ agent, code, plan, steps, flows, reasons });
+        const request = approvals.request({ agent, code, plan, steps, flows, reasons, reveals });
         audit({ type: "approval_requested", executionId, agent, approvalId: request.id });
         return finish({
           executionId,
@@ -210,8 +240,11 @@ export function createGateway(options: GatewayOptions) {
       }
 
       const plannedTools = new Set(plan.calls.map((c) => c.tool));
+      const untrustedBefore = sessionUntrusted.size > 0;
       const untrustedSeen = new Set<string>(sessionUntrusted);
       const calls: CallRecord[] = [];
+      const counts: Counts = {};
+      let touchedConfidential = false;
 
       const guard = (qualified: string, args: unknown): string | undefined => {
         if (!plannedTools.has(qualified) && !(approved && plan.open)) return "Call outside the plan";
@@ -249,7 +282,25 @@ export function createGateway(options: GatewayOptions) {
                     untrustedSeen.add(qualified);
                     sessionUntrusted.add(qualified);
                   }
-                  const result = await upstream.call(tool.name, args);
+                  const outbound = confidential.outbound(args);
+                  for (const reveal of outbound.reveals) {
+                    if (revealDecision(reveal, qualified) !== "allow" && !approvedReveals.has(`${qualified} ${reveal.placeholder}`)) {
+                      record.decision = "blocked";
+                      const reason = `Confidential ${reveal.class} value may not be sent to ${qualified}`;
+                      audit({ type: "blocked", executionId, agent, tool: qualified, reason });
+                      throw new Error(reason);
+                    }
+                    confidential.count(counts, reveal.class, "revealed");
+                    audit({ type: "confidential_revealed", executionId, agent, tool: qualified, class: reveal.class, placeholder: reveal.placeholder });
+                  }
+                  let result: unknown;
+                  try {
+                    result = await upstream.call(tool.name, outbound.args);
+                  } catch (error) {
+                    if (confidential.inspect(qualified, (error as Error).message) > 0) touchedConfidential = true;
+                    throw error;
+                  }
+                  if (confidential.inspect(qualified, result) > 0) touchedConfidential = true;
                   record.ok = true;
                   return result;
                 } finally {
@@ -261,12 +312,26 @@ export function createGateway(options: GatewayOptions) {
         ]),
       );
 
-      const result = await runProgram(code, bindings, limits);
-      return finish(
-        result.ok
-          ? { executionId, status: "completed", value: result.value, calls }
-          : { executionId, status: "failed", error: result.error, calls },
-      );
+      const run = await runProgram(code, bindings, limits);
+      const outcome = run.ok
+        ? { status: "completed" as const, value: confidential.scrub(run.value, counts), calls }
+        : { status: "failed" as const, error: confidential.scrubText(run.error, counts), calls };
+      const kept = Object.keys(counts).length > 0 ? { confidential: counts } : {};
+      if (untrustedBefore && touchedConfidential && !confidentialApproved) {
+        const reason = "Result computed from confidential data after untrusted input";
+        const request = approvals.request({ agent, code, plan, steps: planned.steps!, flows: [], reasons: [reason], held: { ...outcome, ...kept } });
+        audit({ type: "approval_requested", executionId, agent, approvalId: request.id });
+        return finish({
+          executionId,
+          status: "approval_required",
+          approvalId: request.id,
+          approveAt: options.notifyApprover(request.id),
+          plan: planned.steps!.map(formatStep),
+          reasons: [reason],
+          ...kept,
+        });
+      }
+      return finish({ executionId, ...outcome, ...kept });
     },
   };
 }

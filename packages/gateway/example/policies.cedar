@@ -2,6 +2,10 @@
 permit (principal == Agent::"claude-code", action == Action::"call", resource)
 when { context.upstream == "fs" };
 
+// ...the example payroll server, whose fictional salaries and IBANs Sekimori keeps from the model...
+permit (principal == Agent::"claude-code", action == Action::"call", resource)
+when { context.upstream == "payroll" };
+
 // ...and Notion, through the developer's own account...
 permit (principal == Agent::"claude-code", action == Action::"call", resource)
 when { context.upstream == "notion" };
